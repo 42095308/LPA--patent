@@ -16,10 +16,10 @@ from pyproj import Transformer
 import config
 
 # ===== 文件路径常量 =====
-TIF_FILE = "AP_19438_FBD_F0680_RT1.dem.tif"
-CACHE_FILE = "Z_crop.npy"
-CACHE_GEO = "Z_crop_geo.npz"
-CACHE_META = "Z_crop_meta.json"
+TIF_FILE = config.DEM_FILE
+CACHE_FILE = config.DEM_CACHE_FILE
+CACHE_GEO = config.DEM_CACHE_GEO_FILE
+CACHE_META = config.DEM_CACHE_META_FILE
 
 EPSG_SRC = "EPSG:32649"    # WGS84 / UTM zone 49N
 EPSG_WGS84 = "EPSG:4326"
@@ -185,6 +185,7 @@ def load_dem(center_lon: float = DEFAULT_CENTER_LON,
             row_min, row_max, col_min, col_max, x0, y0, sx, sy
         )
 
+        Path(CACHE_FILE).parent.mkdir(parents=True, exist_ok=True)
         np.save(CACHE_FILE, z_crop.astype(np.float32))
         np.savez(CACHE_GEO, lon_grid=lon_grid.astype(np.float64),
                  lat_grid=lat_grid.astype(np.float64))

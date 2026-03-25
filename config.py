@@ -4,6 +4,21 @@
 """
 
 import math
+from pathlib import Path
+
+# ===== Path config =====
+PROJECT_ROOT = Path(__file__).resolve().parent
+DATA_DIR = PROJECT_ROOT / "data"
+RAW_DIR = DATA_DIR / "raw"
+CACHE_DIR = DATA_DIR / "cache"
+OUTPUTS_DIR = PROJECT_ROOT / "outputs"
+SAMPLES_DIR = PROJECT_ROOT / "samples"
+
+DEM_FILE = RAW_DIR / "AP_19438_FBD_F0680_RT1.dem.tif"
+DEM_CACHE_FILE = CACHE_DIR / "Z_crop.npy"
+DEM_CACHE_GEO_FILE = CACHE_DIR / "Z_crop_geo.npz"
+DEM_CACHE_META_FILE = CACHE_DIR / "Z_crop_meta.json"
+SIM_RESULT_FILE = OUTPUTS_DIR / "simulation_results.json"
 
 # ===== 无人机平台参数 =====
 MASS = 8.5              # 整机质量 (kg)

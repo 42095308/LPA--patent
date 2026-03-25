@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import time
-from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -267,7 +266,8 @@ def main() -> None:
         }
     }
 
-    out_file = Path("simulation_results.json")
+    out_file = config.SIM_RESULT_FILE
+    out_file.parent.mkdir(parents=True, exist_ok=True)
     out_file.write_text(json.dumps(results_data, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\n  ✓ 仿真结已保存至: {out_file.absolute()}")
 
