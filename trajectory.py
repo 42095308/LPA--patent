@@ -251,11 +251,21 @@ def classify_flight_phases(energy_map: EnergyMap, path: List[int],
         avg_power = float(np.mean(powers))
         peak_power = float(np.max(powers))
 
-        # ΔP_req：本阶段内相邻段之间的最大功率变化
+        # ΔP_req：本阶段内相邻段之间的功率变化均值
+        # 修复说明：原来用 max() 导致每个阶段均被同一对相邻节点的
+        # 最大跃迁（约 1021W）主导，丢失阶段间差异。
+        # 改为均值（或 90 分位数），能区分各阶段的典型扰动水平。
         dp_reqs = []
         for i in range(1, len(powers)):
             dp_reqs.append(abs(powers[i] - powers[i - 1]))
-        dp_req = float(max(dp_reqs)) if dp_reqs else 0.0
+        if dp_reqs:
+            # 样本足够时取 90 分位数（鲁棒上界）；样本少时取均值
+            if len(dp_reqs) >= 5:
+                dp_req = float(np.percentile(dp_reqs, 90))
+            else:
+                dp_req = float(np.mean(dp_reqs))
+        else:
+            dp_req = 0.0
 
         phases.append({
             "phase": phase_name,

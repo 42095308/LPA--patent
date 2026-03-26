@@ -228,14 +228,15 @@ class EnergyMap:
                 n1 = self.nodes[nid]
                 n2 = self.nodes[neighbor_id]
 
-                # (1) 空间几何代价（欧氏距离，米）
+                # (1) 空间几何量
                 d_h = math.sqrt((n2[0] - n1[0]) ** 2 + (n2[1] - n1[1]) ** 2)
                 d_v = abs(n2[2] - n1[2])
                 d_spatial = math.sqrt(d_h ** 2 + d_v ** 2)
+                flight_time = d_spatial / config.CRUISE_SPEED   # 秒，~2-3
 
                 # (2) 预测氢气消耗
                 alt_mid = 0.5 * (n1[2] + n2[2])
-                climb_rate = (n2[2] - n1[2]) / max(d_spatial / config.CRUISE_SPEED, 0.1)
+                climb_rate = (n2[2] - n1[2]) / max(flight_time, 0.1)
                 wind = self._get_wind(0.5 * (n1[0] + n2[0]), 0.5 * (n1[1] + n2[1]))
 
                 p_hover = _hover_power(alt_mid)
@@ -243,7 +244,6 @@ class EnergyMap:
                 p_cruise = _cruise_power(config.CRUISE_SPEED, wind, alt_mid)
                 p_total = p_hover + p_climb + p_cruise
 
-                flight_time = d_spatial / config.CRUISE_SPEED
                 e_hydrogen = _hydrogen_consumption(p_total, flight_time)
 
                 # (3) 退化惩罚
@@ -251,10 +251,11 @@ class EnergyMap:
                 dp_dt = dp_req / max(flight_time, 0.1)
                 psi_deg = _degradation_penalty(dp_req, dp_dt, self.soh)
 
-                # 综合代价
-                cost = (config.ALPHA * d_spatial
-                        + config.BETA * e_hydrogen
-                        + config.GAMMA * psi_deg)
+                # 综合代价 — 三项归一化到同一数量级 (~2-50)
+                # α·T_flight(秒,~2)  +  β·E_h2×1000(~50)  +  γ·Ψ×100(~1.5)
+                cost = (config.ALPHA * flight_time
+                        + config.BETA * e_hydrogen * 1000.0
+                        + config.GAMMA * psi_deg * 100.0)
 
                 edge_list.append((nid, neighbor_id))
                 d_spatial_list.append(d_spatial)
@@ -323,10 +324,11 @@ class EnergyMap:
             if dist > radius_m + config.GRID_H_RES * 2:
                 continue
 
-            # 重新计算代价
+            # 重新计算代价（与 build_graph 中完全一致的归一化公式）
             d_spatial = float(self.edge_d_spatial[eid])
+            flight_time = d_spatial / config.CRUISE_SPEED
             alt_mid = 0.5 * (n1[2] + n2[2])
-            climb_rate = (n2[2] - n1[2]) / max(d_spatial / config.CRUISE_SPEED, 0.1)
+            climb_rate = (n2[2] - n1[2]) / max(flight_time, 0.1)
             wind = self._get_wind(mid_x, mid_y)
 
             p_hover = _hover_power(alt_mid)
@@ -334,7 +336,6 @@ class EnergyMap:
             p_cruise = _cruise_power(config.CRUISE_SPEED, wind, alt_mid)
             p_total = p_hover + p_climb + p_cruise
 
-            flight_time = d_spatial / config.CRUISE_SPEED
             e_hydrogen = _hydrogen_consumption(p_total, flight_time)
 
             dp_req = abs(p_total - prev_power)
@@ -342,9 +343,9 @@ class EnergyMap:
             psi_deg = _degradation_penalty(dp_req, dp_dt, self.soh)
 
             old_cost = float(self.edge_costs[eid])
-            new_cost = (config.ALPHA * d_spatial
-                        + config.BETA * e_hydrogen
-                        + config.GAMMA * psi_deg)
+            new_cost = (config.ALPHA * flight_time
+                        + config.BETA * e_hydrogen * 1000.0
+                        + config.GAMMA * psi_deg * 100.0)
 
             # 只要代价增加超过阈值（5%），就标记为受影响边
             if new_cost > old_cost * config.WIND_TRIGGER_RATIO:
