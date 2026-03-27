@@ -1,4 +1,4 @@
-"""Energy map and dynamic environment model."""
+﻿"""Energy map and dynamic environment model."""
 
 from __future__ import annotations
 
@@ -82,11 +82,12 @@ class EnergyMap:
         self.edge_flight_time_s: np.ndarray = np.empty(0, dtype=float)
         self.edge_h2_g: np.ndarray = np.empty(0, dtype=float)
         self.edge_psi_degradation: np.ndarray = np.empty(0, dtype=float)
-        self.edge_costs: np.ndarray = np.empty(0, dtype=float)
+        self.edge_operating_cost: np.ndarray = np.empty(0, dtype=float)
         self.edge_midpoints_xy: np.ndarray = np.empty((0, 2), dtype=float)
 
         self._grid_to_node: Dict[Tuple[int, int, int], int] = {}
         self._node_search_tree: cKDTree | None = None
+        self._edge_search_tree: cKDTree | None = None
         self._node_search_scale = np.array([1.0, 1.0, 0.1], dtype=float)
 
     def clone_dynamic_state(self) -> "EnergyMap":
@@ -95,7 +96,7 @@ class EnergyMap:
         cloned.wind_field = np.array(self.wind_field, copy=True)
         cloned.edge_h2_g = np.array(self.edge_h2_g, copy=True)
         cloned.edge_psi_degradation = np.array(self.edge_psi_degradation, copy=True)
-        cloned.edge_costs = np.array(self.edge_costs, copy=True)
+        cloned.edge_operating_cost = np.array(self.edge_operating_cost, copy=True)
         return cloned
 
     def _dem_rc(self, x_m: float, y_m: float) -> Tuple[int, int]:
@@ -146,6 +147,27 @@ class EnergyMap:
             or dist_goal <= corridor_radius_m + config.CORRIDOR_ENDPOINT_MARGIN_M
         )
 
+    def _health_weight(self) -> float:
+        return float(config.k_soh(self.soh))
+
+    def _compose_edge_cost(self, operating_cost: float, psi_degradation: float) -> float:
+        return float(operating_cost + config.GAMMA * psi_degradation * self._health_weight())
+
+    def _local_degradation_proxy(self, p_total_w: float, climb_rate_mps: float, wind_speed_mps: float) -> float:
+        """Return a local static stress proxy for graph-level degradation avoidance."""
+        climb_penalty = max(0.0, climb_rate_mps) / max(config.DEGRAD_CLIMB_RATE_REF_MPS, 1e-6)
+        high_power_threshold = config.FC_RATED_POWER * config.DEGRAD_HIGH_POWER_RATIO
+        high_power_penalty = max(0.0, p_total_w - high_power_threshold) / max(high_power_threshold, 1e-6)
+        wind_penalty = max(0.0, wind_speed_mps - config.WIND_NORMAL) / max(
+            config.DEGRAD_WIND_EXCESS_REF_MPS,
+            1e-6,
+        )
+        return (
+            config.DEGRAD_CLIMB_WEIGHT * climb_penalty
+            + config.DEGRAD_HIGH_POWER_WEIGHT * high_power_penalty
+            + config.DEGRAD_WIND_WEIGHT * wind_penalty
+        )
+
     def _edge_metrics_for_nodes(self, node_from: int, node_to: int) -> Dict[str, float]:
         n1 = self.nodes[node_from]
         n2 = self.nodes[node_to]
@@ -165,18 +187,16 @@ class EnergyMap:
         p_cruise = _cruise_power(config.CRUISE_SPEED, wind_speed, alt_mid)
         p_total = p_hover + p_climb + p_cruise
         h2_g = _hydrogen_consumption(p_total, flight_time_s)
+        operating_cost = config.ALPHA * flight_time_s + config.BETA * h2_g * config.H2_COST_SCALE
         psi_degradation_local = self._local_degradation_proxy(p_total, climb_rate, wind_speed)
-        cost = (
-            config.ALPHA * flight_time_s
-            + config.BETA * h2_g * config.H2_COST_SCALE
-            + config.GAMMA * psi_degradation_local
-        )
+        cost = self._compose_edge_cost(operating_cost, psi_degradation_local)
         return {
             "distance_m": distance_m,
             "flight_time_s": flight_time_s,
             "wind_speed_mps": wind_speed,
             "p_total_w": p_total,
             "h2_g": h2_g,
+            "operating_cost": operating_cost,
             "psi_degradation_local": psi_degradation_local,
             "cost": cost,
             "mid_x": mid_x,
@@ -184,21 +204,6 @@ class EnergyMap:
             "climb_rate_mps": climb_rate,
             "altitude_mid_m": alt_mid,
         }
-
-    def _local_degradation_proxy(self, p_total_w: float, climb_rate_mps: float, wind_speed_mps: float) -> float:
-        """Return a local static stress proxy for graph-level degradation avoidance."""
-        climb_penalty = max(0.0, climb_rate_mps) / max(config.DEGRAD_CLIMB_RATE_REF_MPS, 1e-6)
-        high_power_threshold = config.FC_RATED_POWER * config.DEGRAD_HIGH_POWER_RATIO
-        high_power_penalty = max(0.0, p_total_w - high_power_threshold) / max(high_power_threshold, 1e-6)
-        wind_penalty = max(0.0, wind_speed_mps - config.WIND_NORMAL) / max(
-            config.DEGRAD_WIND_EXCESS_REF_MPS,
-            1e-6,
-        )
-        return config.k_soh(self.soh) * (
-            config.DEGRAD_CLIMB_WEIGHT * climb_penalty
-            + config.DEGRAD_HIGH_POWER_WEIGHT * high_power_penalty
-            + config.DEGRAD_WIND_WEIGHT * wind_penalty
-        )
 
     def build_graph(self, corridor_radius_m: float = config.INITIAL_CORRIDOR_RADIUS_M) -> None:
         """Build a corridor graph around the mission start-goal line."""
@@ -241,7 +246,7 @@ class EnergyMap:
 
         self.nodes = np.array(node_list, dtype=float)
         if len(self.nodes) == 0:
-            raise RuntimeError("No nodes generated for the corridor graph.")
+            raise RuntimeError("Corridor graph build produced no nodes.")
 
         offsets = [
             (dx, dy, dz)
@@ -256,7 +261,7 @@ class EnergyMap:
         edge_time: list[float] = []
         edge_h2: list[float] = []
         edge_psi: list[float] = []
-        edge_costs: list[float] = []
+        edge_operating: list[float] = []
         edge_midpoints: list[Tuple[float, float]] = []
 
         for (ix, iy, iz), node_id in self._grid_to_node.items():
@@ -270,7 +275,7 @@ class EnergyMap:
                 edge_time.append(metrics["flight_time_s"])
                 edge_h2.append(metrics["h2_g"])
                 edge_psi.append(metrics["psi_degradation_local"])
-                edge_costs.append(metrics["cost"])
+                edge_operating.append(metrics["operating_cost"])
                 edge_midpoints.append((metrics["mid_x"], metrics["mid_y"]))
 
         self.edges = edge_list
@@ -278,7 +283,7 @@ class EnergyMap:
         self.edge_flight_time_s = np.array(edge_time, dtype=float)
         self.edge_h2_g = np.array(edge_h2, dtype=float)
         self.edge_psi_degradation = np.array(edge_psi, dtype=float)
-        self.edge_costs = np.array(edge_costs, dtype=float)
+        self.edge_operating_cost = np.array(edge_operating, dtype=float)
         self.edge_midpoints_xy = np.array(edge_midpoints, dtype=float)
 
         self.adj = {i: [] for i in range(len(self.nodes))}
@@ -289,6 +294,7 @@ class EnergyMap:
 
         scaled_nodes = self.nodes * self._node_search_scale
         self._node_search_tree = cKDTree(scaled_nodes)
+        self._edge_search_tree = cKDTree(self.edge_midpoints_xy) if len(self.edge_midpoints_xy) else None
 
     def position_from_node(self, node_id: int) -> Tuple[float, float, float]:
         node = self.nodes[node_id]
@@ -306,16 +312,74 @@ class EnergyMap:
         return int(node_id)
 
     def get_edge_cost(self, edge_id: int) -> float:
-        return float(self.edge_costs[edge_id])
+        return self._compose_edge_cost(self.edge_operating_cost[edge_id], self.edge_psi_degradation[edge_id])
 
     def set_soh(self, soh: float) -> None:
-        """Apply a new health state and refresh all graph edge costs."""
+        """Update the global health weight without eagerly refreshing all edge metrics."""
         self.soh = float(np.clip(soh, config.MIN_SOH, config.INITIAL_SOH))
-        for edge_id, (u, v) in enumerate(self.edges):
-            metrics = self._edge_metrics_for_nodes(u, v)
-            self.edge_h2_g[edge_id] = metrics["h2_g"]
-            self.edge_psi_degradation[edge_id] = metrics["psi_degradation_local"]
-            self.edge_costs[edge_id] = metrics["cost"]
+
+    def find_edges_near_path(
+        self,
+        current_xyz: Tuple[float, float, float],
+        remaining_path_nodes: List[int],
+        radius_m: float,
+        max_waypoints: int | None = None,
+    ) -> List[int]:
+        if self._edge_search_tree is None or len(self.edge_midpoints_xy) == 0:
+            return []
+        if max_waypoints is None:
+            max_waypoints = config.T4_LOCAL_MAX_WAYPOINTS
+
+        waypoints = [np.array(current_xyz[:2], dtype=float)]
+        for node_id in remaining_path_nodes:
+            node_xyz = self.position_from_node(node_id)
+            waypoints.append(np.array(node_xyz[:2], dtype=float))
+
+        sampled_waypoints = waypoints[:max_waypoints]
+
+        edge_ids: set[int] = set()
+        for waypoint in sampled_waypoints:
+            for edge_id in self._edge_search_tree.query_ball_point(waypoint, radius_m):
+                edge_ids.add(int(edge_id))
+        return sorted(edge_ids)
+
+    def filter_edges_by_cost_delta(
+        self,
+        edge_ids: List[int],
+        previous_soh: float,
+        new_soh: float,
+        ratio_threshold: float,
+        abs_threshold: float,
+    ) -> Dict[str, object]:
+        if not edge_ids:
+            return {
+                "edge_ids": [],
+                "candidate_edges": 0,
+                "updated_edges": 0,
+                "max_cost_delta_ratio": 0.0,
+                "max_cost_delta_abs": 0.0,
+            }
+
+        idx = np.asarray(edge_ids, dtype=int)
+        old_weight = float(config.k_soh(previous_soh))
+        new_weight = float(config.k_soh(new_soh))
+        base_cost = self.edge_operating_cost[idx]
+        psi_cost = config.GAMMA * self.edge_psi_degradation[idx]
+        old_cost = base_cost + psi_cost * old_weight
+        new_cost = base_cost + psi_cost * new_weight
+
+        delta_abs = np.abs(new_cost - old_cost)
+        delta_ratio = delta_abs / np.maximum(old_cost, 1e-9)
+        mask = (delta_ratio >= ratio_threshold) | (delta_abs >= abs_threshold)
+        filtered_ids = idx[mask].astype(int).tolist()
+
+        return {
+            "edge_ids": filtered_ids,
+            "candidate_edges": int(len(idx)),
+            "updated_edges": int(mask.sum()),
+            "max_cost_delta_ratio": float(np.max(delta_ratio)) if len(delta_ratio) else 0.0,
+            "max_cost_delta_abs": float(np.max(delta_abs)) if len(delta_abs) else 0.0,
+        }
 
     def update_wind_field(
         self,
@@ -338,12 +402,13 @@ class EnergyMap:
             mid_x, mid_y = self.edge_midpoints_xy[edge_id]
             if math.hypot(mid_x - cx_m, mid_y - cy_m) > radius_m + config.GRID_H_RES * 2.0:
                 continue
-            old_cost = float(self.edge_costs[edge_id])
+            old_cost = self.get_edge_cost(edge_id)
             metrics = self._edge_metrics_for_nodes(u, v)
             self.edge_h2_g[edge_id] = metrics["h2_g"]
             self.edge_psi_degradation[edge_id] = metrics["psi_degradation_local"]
-            self.edge_costs[edge_id] = metrics["cost"]
-            if metrics["cost"] > old_cost * config.WIND_TRIGGER_RATIO:
+            self.edge_operating_cost[edge_id] = metrics["operating_cost"]
+            new_cost = self.get_edge_cost(edge_id)
+            if new_cost > old_cost * config.WIND_TRIGGER_RATIO:
                 affected_edges.append(edge_id)
         return affected_edges
 
@@ -397,3 +462,5 @@ class EnergyMap:
             "end_y": float(n2[1]),
             "end_z": float(n2[2]),
         }
+
+

@@ -1,4 +1,4 @@
-"""Path planners for the corridor energy map."""
+﻿"""Path planners for the corridor energy map."""
 
 from __future__ import annotations
 
@@ -30,7 +30,6 @@ class LPAStar:
         self._counter = 0
         self._heap: list[Tuple[float, float, int, int]] = []
         self._in_heap: Dict[int, Tuple[float, float]] = {}
-        self._edge_cost_override: Dict[int, float] = {}
 
         self.nodes_expanded = 0
         self.expanded_nodes_list: List[int] = []
@@ -38,8 +37,6 @@ class LPAStar:
         self._push(goal, self._calc_key(goal))
 
     def _get_edge_cost(self, edge_id: int) -> float:
-        if edge_id in self._edge_cost_override:
-            return self._edge_cost_override[edge_id]
         return self.em.get_edge_cost(edge_id)
 
     def _heuristic(self, node_id: int) -> float:
@@ -142,8 +139,8 @@ class LPAStar:
 
         return np.isfinite(self.g[self.current_start])
 
-    def update_edge_cost(self, edge_id: int, new_cost: float) -> None:
-        self._edge_cost_override[edge_id] = new_cost
+    def update_edge_cost(self, edge_id: int, new_cost: float | None = None) -> None:
+        del new_cost
         node_from, _ = self.em.edges[edge_id]
         self.update_vertex(node_from)
 

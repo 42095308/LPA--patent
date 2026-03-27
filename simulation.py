@@ -389,7 +389,12 @@ def apply_t3_trigger(chain: ChainState, event_id: int) -> TriggerDecision:
 
 def apply_t4_trigger(chain: ChainState, event_id: int) -> TriggerDecision:
     estimated_soh = float(chain.estimated_soh)
+    previous_soh = float(chain.energy_map.soh)
+    previous_weight = float(config.k_soh(previous_soh))
+    previous_stage = int(config.health_reset_stage(previous_soh))
     health_weight = float(config.k_soh(estimated_soh))
+    health_stage = int(config.health_reset_stage(estimated_soh))
+    weight_delta = abs(health_weight - previous_weight)
     stress_trigger = chain.online_fc_stress_index >= config.T4_FC_STRESS_TRIGGER
     soh_trigger = estimated_soh <= config.SOH_TRIGGER_THRESHOLD
     weight_trigger = health_weight >= config.T4_HEALTH_WEIGHT_TRIGGER
@@ -405,9 +410,39 @@ def apply_t4_trigger(chain: ChainState, event_id: int) -> TriggerDecision:
     if not reasons:
         reasons.append("health_within_limit")
 
-    if triggered and abs(chain.energy_map.soh - estimated_soh) > 1e-9:
+    planner_action = "none"
+    local_refreshed_edges = 0
+    chain.force_planner_reset = False
+    if triggered and abs(previous_soh - estimated_soh) > 1e-9:
         chain.energy_map.set_soh(estimated_soh)
-        chain.force_planner_reset = chain.lpa_planner is not None
+        heavy_reset = (
+            health_stage != previous_stage
+            and weight_delta >= config.T4_HEAVY_WEIGHT_DELTA
+        ) or (weight_delta >= config.T4_HEAVY_WEIGHT_DELTA)
+        if chain.lpa_planner is not None:
+            if heavy_reset:
+                chain.force_planner_reset = True
+                planner_action = "heavy_reset"
+            else:
+                local_edges = chain.energy_map.find_edges_near_path(
+                    chain.flight_state.current_xyz,
+                    remaining_path_snapshot(chain),
+                    config.T4_LOCAL_REFRESH_RADIUS_M,
+                    max_waypoints=config.T4_LOCAL_MAX_WAYPOINTS,
+                )
+                delta_filter = chain.energy_map.filter_edges_by_cost_delta(
+                    local_edges,
+                    previous_soh,
+                    estimated_soh,
+                    config.T4_COST_DELTA_RATIO_THRESHOLD,
+                    config.T4_COST_DELTA_ABS_THRESHOLD,
+                )
+                for edge_id in delta_filter["edge_ids"]:
+                    chain.lpa_planner.update_edge_cost(edge_id)
+                local_refreshed_edges = int(delta_filter["updated_edges"])
+                planner_action = "local_refresh" if local_refreshed_edges > 0 else "local_refresh_filtered"
+        else:
+            planner_action = "global_weight_only"
 
     return TriggerDecision(
         trigger_id="T4",
@@ -417,11 +452,20 @@ def apply_t4_trigger(chain: ChainState, event_id: int) -> TriggerDecision:
             "event_id": event_id,
             "estimated_soh": estimated_soh,
             "map_soh": float(chain.energy_map.soh),
+            "previous_health_weight": previous_weight,
             "health_weight": health_weight,
+            "previous_health_stage": previous_stage,
+            "health_stage": health_stage,
+            "health_weight_delta": weight_delta,
             "online_fc_stress_index": float(chain.online_fc_stress_index),
             "stress_threshold": config.T4_FC_STRESS_TRIGGER,
             "soh_threshold": config.SOH_TRIGGER_THRESHOLD,
             "planner_reset": bool(chain.force_planner_reset),
+            "planner_action": planner_action,
+            "candidate_local_edges": int(delta_filter["candidate_edges"]) if "delta_filter" in locals() else 0,
+            "local_refreshed_edges": local_refreshed_edges,
+            "max_cost_delta_ratio": float(delta_filter["max_cost_delta_ratio"]) if "delta_filter" in locals() else 0.0,
+            "max_cost_delta_abs": float(delta_filter["max_cost_delta_abs"]) if "delta_filter" in locals() else 0.0,
         },
     )
 
@@ -730,6 +774,7 @@ def build_report_tables(results_data: Dict[str, object]) -> Dict[str, object]:
         )
 
     return {
+        "primary_parameter_set_label": results_data["primary_parameter_set_label"],
         "table1": {
             "proposed_initial_phases": proposed["initial_phases"],
             "traditional_initial_phases": traditional["initial_phases"],
@@ -855,27 +900,29 @@ def main() -> None:
     goal_node = base_map.find_nearest_node(config.GOAL_LON, config.GOAL_LAT, config.GOAL_ALT)
 
     scenario_results: Dict[str, Dict[str, object]] = {}
-    for label in ("conservative", "current", "aggressive"):
+    sweep_labels = tuple(config.SWEEP_PRESETS.keys())
+    for label in sweep_labels:
         with temporary_config(config.SWEEP_PRESETS[label]):
             scenario_results[label] = run_scenario(
                 label,
                 base_map,
                 start_node,
                 goal_node,
-                verbose=(label == "current"),
+                verbose=(label == config.PRIMARY_SWEEP_LABEL),
             )
 
-    current_results = scenario_results["current"]
+    primary_results = scenario_results[config.PRIMARY_SWEEP_LABEL]
     parameter_sweep = {
         label: summarize_scenario_for_sweep(data)
         for label, data in scenario_results.items()
     }
 
     results_data = {
-        "config_snapshot": current_results["config_snapshot"],
-        "scenario": current_results["scenario"],
-        "chains": current_results["chains"],
-        "comparison": current_results["comparison"],
+        "config_snapshot": primary_results["config_snapshot"],
+        "scenario": primary_results["scenario"],
+        "chains": primary_results["chains"],
+        "comparison": primary_results["comparison"],
+        "primary_parameter_set_label": config.PRIMARY_SWEEP_LABEL,
         "parameter_sweep": parameter_sweep,
     }
     report_tables = build_report_tables(results_data)
@@ -887,9 +934,9 @@ def main() -> None:
     assert config.SIM_RESULT_FILE.exists(), "simulation_results.json was not generated."
     assert config.REPORT_TABLES_FILE.exists(), "report_tables.json was not generated."
 
-    proposed_results = current_results["chains"]["proposed"]
-    traditional_results = current_results["chains"]["traditional"]
-    comparison = current_results["comparison"]
+    proposed_results = primary_results["chains"]["proposed"]
+    traditional_results = primary_results["chains"]["traditional"]
+    comparison = primary_results["comparison"]
 
     print("\nSummary")
     print(f"  Proposed H2: {proposed_results['h2_total_g']:.3f} g")
@@ -904,3 +951,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+

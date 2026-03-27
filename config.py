@@ -1,4 +1,4 @@
-"""Central configuration for the patent_python simulation."""
+﻿"""Central configuration for the patent_python simulation."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ DEM_CACHE_GEO_FILE: Path = CACHE_DIR / "Z_crop_geo.npz"
 DEM_CACHE_META_FILE: Path = CACHE_DIR / "Z_crop_meta.json"
 SIM_RESULT_FILE: Path = OUTPUTS_DIR / "simulation_results.json"
 REPORT_TABLES_FILE: Path = OUTPUTS_DIR / "report_tables.json"
+DOC_PAYLOAD_FILE: Path = OUTPUTS_DIR / "document_payload.json"
 
 # Platform parameters
 MASS: float = 8.5
@@ -55,7 +56,10 @@ MIN_SOH: float = 0.70
 SOH_TRIGGER_THRESHOLD: float = 0.895
 T4_FC_STRESS_TRIGGER: float = 20.0
 T4_HEALTH_WEIGHT_TRIGGER: float = 1.02
+T4_HEAVY_WEIGHT_DELTA: float = 0.30
 SOH_DEGRADATION_PER_FC_STRESS: float = 2.0e-4
+T4_COST_DELTA_RATIO_THRESHOLD: float = 0.01
+T4_COST_DELTA_ABS_THRESHOLD: float = 0.02
 
 # Simulation parameters
 CRUISE_SPEED: float = 15.0
@@ -83,6 +87,8 @@ SMOOTHING_FACTOR: float = 0.3
 INITIAL_CORRIDOR_RADIUS_M: float = 600.0
 CORRIDOR_ENDPOINT_MARGIN_M: float = 250.0
 EVENT_CENTER_LOOKAHEAD_M: float = 150.0
+T4_LOCAL_REFRESH_RADIUS_M: float = 80.0
+T4_LOCAL_MAX_WAYPOINTS: int = 4
 WINDSHEAR_TIME: float = 15.0
 WINDSHEAR_AHEAD_M: float = 150.0
 WIND_NORMAL: float = 3.0
@@ -116,6 +122,7 @@ SWEEP_PRESETS: dict[str, dict[str, float]] = {
         "WIND_TRIGGER_RATIO": 1.10,
     },
 }
+PRIMARY_SWEEP_LABEL: str = "current"
 
 # Mission configuration
 START_LON: float = 110.0869
@@ -143,6 +150,16 @@ def k_soh(soh: float) -> float:
     if soh >= 0.7:
         return 1.5 + (0.8 - soh) / 0.1 * 0.7
     return 2.2
+
+
+def health_reset_stage(soh: float) -> int:
+    """Return a coarse health stage for deciding whether a planner reset is necessary."""
+    weight = k_soh(soh)
+    if weight < 1.25:
+        return 0
+    if weight < 1.75:
+        return 1
+    return 2
 
 
 def air_density(altitude_m: float) -> float:
@@ -185,7 +202,10 @@ def snapshot() -> dict[str, Any]:
             "soh_trigger_threshold": SOH_TRIGGER_THRESHOLD,
             "t4_fc_stress_trigger": T4_FC_STRESS_TRIGGER,
             "t4_health_weight_trigger": T4_HEALTH_WEIGHT_TRIGGER,
+            "t4_heavy_weight_delta": T4_HEAVY_WEIGHT_DELTA,
             "soh_degradation_per_fc_stress": SOH_DEGRADATION_PER_FC_STRESS,
+            "t4_cost_delta_ratio_threshold": T4_COST_DELTA_RATIO_THRESHOLD,
+            "t4_cost_delta_abs_threshold": T4_COST_DELTA_ABS_THRESHOLD,
         },
         "simulation": {
             "cruise_speed_mps": CRUISE_SPEED,
@@ -207,15 +227,19 @@ def snapshot() -> dict[str, Any]:
             "initial_corridor_radius_m": INITIAL_CORRIDOR_RADIUS_M,
             "corridor_endpoint_margin_m": CORRIDOR_ENDPOINT_MARGIN_M,
             "event_center_lookahead_m": EVENT_CENTER_LOOKAHEAD_M,
+            "t4_local_refresh_radius_m": T4_LOCAL_REFRESH_RADIUS_M,
+            "t4_local_max_waypoints": T4_LOCAL_MAX_WAYPOINTS,
             "windshear_ahead_m": WINDSHEAR_AHEAD_M,
             "wind_normal_mps": WIND_NORMAL,
             "wind_shear_mps": WIND_SHEAR,
             "n_events": N_EVENTS,
             "event_intervals_s": list(EVENT_INTERVALS),
             "sweep_presets": SWEEP_PRESETS,
+            "primary_sweep_label": PRIMARY_SWEEP_LABEL,
         },
         "mission": {
             "start": {"lon": START_LON, "lat": START_LAT, "alt": START_ALT},
             "goal": {"lon": GOAL_LON, "lat": GOAL_LAT, "alt": GOAL_ALT},
         },
     }
+
