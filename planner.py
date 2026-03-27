@@ -1,7 +1,4 @@
-"""
-步骤二/三：LPA* 路径规划器
-包含 LPA* 增量路径规划和传统 A* 全局规划（对照组）
-"""
+"""Path planners for the corridor energy map."""
 
 from __future__ import annotations
 
@@ -17,353 +14,238 @@ from energy_map import EnergyMap
 
 
 class LPAStar:
-    """
-    LPA*（Lifelong Planning A*）增量路径规划器
+    """Reverse LPA* with fixed goal and movable start."""
 
-    核心数据结构：
-        g[s]   : 当前从起点到 s 的已知最短路径代价
-        rhs[s] : 一步超前值，rhs[s] = min_{pred} [g(pred) + c(pred, s)]
-        U      : 优先队列，存放不一致节点
-
-    当 g(s) = rhs(s) 时节点局部一致，否则为局部不一致
-    """
-
-    def __init__(self, energy_map: EnergyMap, start: int, goal: int):
+    def __init__(self, energy_map: EnergyMap, goal: int):
         self.em = energy_map
-        self.start = start
         self.goal = goal
+        self.current_start = goal
         self.n_nodes = len(energy_map.nodes)
-        self.INF = float('inf')
+        self.inf = float("inf")
 
-        # g 和 rhs 初始化为 ∞
-        self.g = np.full(self.n_nodes, self.INF)
-        self.rhs = np.full(self.n_nodes, self.INF)
+        self.g = np.full(self.n_nodes, self.inf, dtype=float)
+        self.rhs = np.full(self.n_nodes, self.inf, dtype=float)
+        self.rhs[goal] = 0.0
 
-        # 起点 rhs = 0
-        self.rhs[start] = 0.0
-
-        # 优先队列
         self._counter = 0
-        self._heap: List[Tuple[float, float, int, int]] = []
+        self._heap: list[Tuple[float, float, int, int]] = []
         self._in_heap: Dict[int, Tuple[float, float]] = {}
+        self._edge_cost_override: Dict[int, float] = {}
 
-        self._push(start, self._calc_key(start))
-
-        # 统计
         self.nodes_expanded = 0
         self.expanded_nodes_list: List[int] = []
 
-        # 边代价缓存（支持动态修改）
-        self._edge_cost_override: Dict[int, float] = {}
+        self._push(goal, self._calc_key(goal))
 
     def _get_edge_cost(self, edge_id: int) -> float:
-        """获取边代价（支持动态修改）"""
         if edge_id in self._edge_cost_override:
             return self._edge_cost_override[edge_id]
         return self.em.get_edge_cost(edge_id)
 
-    def _calc_key(self, s: int) -> Tuple[float, float]:
-        """
-        LPA* 优先级键：
-            k1 = min(g(s), rhs(s)) + h(s)
-            k2 = min(g(s), rhs(s))
-        """
-        base = min(self.g[s], self.rhs[s])
-        return (base + self._heuristic(s), base)
-
-    def _heuristic(self, s: int) -> float:
-        """
-        可容许启发式函数：基于直线距离的最低飞行代价下界
-        """
-        n_s = self.em.nodes[s]
-        n_g = self.em.nodes[self.goal]
-        dx = n_g[0] - n_s[0]
-        dy = n_g[1] - n_s[1]
-        dz = n_g[2] - n_s[2]
+    def _heuristic(self, node_id: int) -> float:
+        node = self.em.nodes[node_id]
+        start = self.em.nodes[self.current_start]
+        dx = float(start[0] - node[0])
+        dy = float(start[1] - node[1])
+        dz = float(start[2] - node[2])
         d3d = math.sqrt(dx * dx + dy * dy + dz * dz)
+        return config.ALPHA * (d3d / config.CRUISE_SPEED)
 
-        # 空间距离下界
-        h_spatial = config.ALPHA * d3d
-        return h_spatial
+    def _calc_key(self, node_id: int) -> Tuple[float, float]:
+        base = min(self.g[node_id], self.rhs[node_id])
+        return (base + self._heuristic(node_id), base)
 
-    def _push(self, node: int, key: Tuple[float, float]) -> None:
+    def _push(self, node_id: int, key: Tuple[float, float]) -> None:
         self._counter += 1
-        heapq.heappush(self._heap, (key[0], key[1], self._counter, node))
-        self._in_heap[node] = key
+        heapq.heappush(self._heap, (key[0], key[1], self._counter, node_id))
+        self._in_heap[node_id] = key
 
     def _pop(self) -> Tuple[Optional[int], Optional[Tuple[float, float]]]:
         while self._heap:
-            k1, k2, _, node = heapq.heappop(self._heap)
-            cur_key = self._in_heap.get(node)
+            k1, k2, _, node_id = heapq.heappop(self._heap)
+            cur_key = self._in_heap.get(node_id)
             if cur_key is not None and cur_key == (k1, k2):
-                del self._in_heap[node]
-                return node, (k1, k2)
+                del self._in_heap[node_id]
+                return node_id, (k1, k2)
         return None, None
 
     def _top_key(self) -> Tuple[float, float]:
         while self._heap:
-            k1, k2, _, node = self._heap[0]
-            cur_key = self._in_heap.get(node)
+            k1, k2, _, node_id = self._heap[0]
+            cur_key = self._in_heap.get(node_id)
             if cur_key is not None and cur_key == (k1, k2):
                 return (k1, k2)
             heapq.heappop(self._heap)
-        return (self.INF, self.INF)
+        return (self.inf, self.inf)
 
-    def update_vertex(self, u: int) -> None:
-        """重新计算 u 的 rhs 值"""
-        if u != self.start:
-            best = self.INF
-            for v, eid in self.em.adj.get(u, []):
-                # 反向：从前驱到u的代价
-                # 注意邻接表存的是出边，需要考虑入边
-                pass
+    def _rekey_open_set(self) -> None:
+        nodes = list(self._in_heap.keys())
+        self._heap = []
+        self._in_heap = {}
+        for node_id in nodes:
+            self._push(node_id, self._calc_key(node_id))
 
-            # 遍历所有可能的前驱节点
-            best = self.INF
-            for pred_node in range(self.n_nodes):
-                for neighbor, eid in self.em.adj.get(pred_node, []):
-                    if neighbor == u:
-                        c = self._get_edge_cost(eid)
-                        if self.g[pred_node] + c < best:
-                            best = self.g[pred_node] + c
-            self.rhs[u] = best
+    def update_vertex(self, node_id: int) -> None:
+        if node_id != self.goal:
+            best = self.inf
+            for succ, edge_id in self.em.adj.get(node_id, []):
+                candidate = self._get_edge_cost(edge_id) + self.g[succ]
+                if candidate < best:
+                    best = candidate
+            self.rhs[node_id] = best
 
-        # 维护优先队列
-        if u in self._in_heap:
-            del self._in_heap[u]
+        if node_id in self._in_heap:
+            del self._in_heap[node_id]
 
-        if self.g[u] != self.rhs[u]:
-            self._push(u, self._calc_key(u))
+        if not math.isclose(self.g[node_id], self.rhs[node_id], rel_tol=0.0, abs_tol=1e-12):
+            self._push(node_id, self._calc_key(node_id))
 
-    def _update_vertex_fast(self, u: int) -> None:
-        """
-        快速更新 vertex（用反向邻接表）
-        """
-        if u != self.start:
-            best = self.INF
-            # 查找所有指向 u 的边
-            for pred_node, neighbors in self.em.adj.items():
-                for neighbor, eid in neighbors:
-                    if neighbor == u:
-                        c = self._get_edge_cost(eid)
-                        val = self.g[pred_node] + c
-                        if val < best:
-                            best = val
-            self.rhs[u] = best
-
-        if u in self._in_heap:
-            del self._in_heap[u]
-
-        if self.g[u] != self.rhs[u]:
-            self._push(u, self._calc_key(u))
-
-    def _build_reverse_adj(self) -> None:
-        """构建反向邻接表，加速 update_vertex"""
-        self._rev_adj: Dict[int, List[Tuple[int, int]]] = {
-            i: [] for i in range(self.n_nodes)
-        }
-        for node, neighbors in self.em.adj.items():
-            for neighbor, eid in neighbors:
-                self._rev_adj[neighbor].append((node, eid))
-
-    def _update_vertex_with_rev(self, u: int) -> None:
-        """使用反向邻接表的快速更新"""
-        if u != self.start:
-            best = self.INF
-            for pred, eid in self._rev_adj.get(u, []):
-                c = self._get_edge_cost(eid)
-                val = self.g[pred] + c
-                if val < best:
-                    best = val
-            self.rhs[u] = best
-
-        if u in self._in_heap:
-            del self._in_heap[u]
-
-        if self.g[u] != self.rhs[u]:
-            self._push(u, self._calc_key(u))
-
-    def compute_shortest_path(self) -> bool:
-        """
-        核心搜索循环：
-        持续处理优先队列中的不一致节点，直到终点一致且队列为空
-        """
-        # 确保反向邻接表存在
-        if not hasattr(self, '_rev_adj'):
-            self._build_reverse_adj()
+    def compute_shortest_path(self, current_start: int) -> bool:
+        previous_start = self.current_start
+        self.current_start = current_start
+        if previous_start != current_start and self._in_heap:
+            self._rekey_open_set()
 
         self.nodes_expanded = 0
         self.expanded_nodes_list = []
 
-        while True:
-            top_key = self._top_key()
-            goal_key = self._calc_key(self.goal)
+        while (
+            self._top_key() < self._calc_key(self.current_start)
+            or not math.isclose(
+                self.g[self.current_start],
+                self.rhs[self.current_start],
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+        ):
+            node_id, old_key = self._pop()
+            if node_id is None or old_key is None:
+                break
 
-            # 终止条件
-            if (top_key >= goal_key and
-                    self.g[self.goal] == self.rhs[self.goal]):
-                break
-            if top_key[0] == self.INF:
-                break
-
-            u, k_old = self._pop()
-            if u is None:
-                break
+            new_key = self._calc_key(node_id)
+            if old_key < new_key:
+                self._push(node_id, new_key)
+                continue
 
             self.nodes_expanded += 1
-            self.expanded_nodes_list.append(u)
-            k_new = self._calc_key(u)
+            self.expanded_nodes_list.append(node_id)
 
-            if k_old < k_new:
-                # key 过期，重新入队
-                self._push(u, k_new)
-            elif self.g[u] > self.rhs[u]:
-                # 过一致：g 值可以降低
-                self.g[u] = self.rhs[u]
-                for neighbor, eid in self.em.adj.get(u, []):
-                    self._update_vertex_with_rev(neighbor)
+            if self.g[node_id] > self.rhs[node_id]:
+                self.g[node_id] = self.rhs[node_id]
+                for pred, _ in self.em.rev_adj.get(node_id, []):
+                    self.update_vertex(pred)
             else:
-                # 欠一致：g 值需要提升
-                self.g[u] = self.INF
-                self._update_vertex_with_rev(u)
-                for neighbor, eid in self.em.adj.get(u, []):
-                    self._update_vertex_with_rev(neighbor)
+                self.g[node_id] = self.inf
+                self.update_vertex(node_id)
+                for pred, _ in self.em.rev_adj.get(node_id, []):
+                    self.update_vertex(pred)
 
-        return self.g[self.goal] < self.INF
+        return np.isfinite(self.g[self.current_start])
 
     def update_edge_cost(self, edge_id: int, new_cost: float) -> None:
-        """
-        动态修改边代价（事件触发时调用）
-        只更新受影响节点的 rhs 值
-        """
         self._edge_cost_override[edge_id] = new_cost
-        u, v = self.em.edges[edge_id]
-        if hasattr(self, '_rev_adj'):
-            self._update_vertex_with_rev(v)
-        else:
-            self._update_vertex_fast(v)
+        node_from, _ = self.em.edges[edge_id]
+        self.update_vertex(node_from)
 
-    def extract_path(self) -> List[int]:
-        """从 goal 向 start 回溯路径"""
-        if self.g[self.goal] == self.INF:
+    def extract_path(self, current_start: int) -> List[int]:
+        if not np.isfinite(self.g[current_start]):
             return []
-        path = [self.goal]
-        cur = self.goal
-        seen = set()
-        while cur != self.start:
-            seen.add(cur)
-            best_pred, best_cost = None, self.INF
-            # 找最佳前驱
-            for pred, eid in self._rev_adj.get(cur, []):
-                c = self._get_edge_cost(eid)
-                total = self.g[pred] + c
-                if total < best_cost and pred not in seen:
-                    best_cost = total
-                    best_pred = pred
-            if best_pred is None:
-                break
-            path.append(best_pred)
-            cur = best_pred
-        path.reverse()
-        return path if (path and path[0] == self.start) else []
+
+        path = [current_start]
+        current = current_start
+        seen = {current}
+        while current != self.goal:
+            best_succ = None
+            best_total = self.inf
+            for succ, edge_id in self.em.adj.get(current, []):
+                total = self._get_edge_cost(edge_id) + self.g[succ]
+                if total < best_total and succ not in seen:
+                    best_total = total
+                    best_succ = succ
+            if best_succ is None:
+                return []
+            path.append(best_succ)
+            current = best_succ
+            seen.add(current)
+        return path
 
     def path_length_m(self, path: List[int]) -> float:
-        """计算路径总长度（米）"""
         total = 0.0
-        for k in range(len(path) - 1):
-            n1 = self.em.nodes[path[k]]
-            n2 = self.em.nodes[path[k + 1]]
-            d = math.sqrt((n2[0] - n1[0]) ** 2 +
-                          (n2[1] - n1[1]) ** 2 +
-                          (n2[2] - n1[2]) ** 2)
-            total += d
+        for idx in range(len(path) - 1):
+            n1 = self.em.nodes[path[idx]]
+            n2 = self.em.nodes[path[idx + 1]]
+            total += math.dist(n1, n2)
         return total
 
-    def path_total_cost(self, path: List[int]) -> float:
-        """计算路径总代价"""
-        return float(self.g[self.goal]) if self.g[self.goal] < self.INF else float('inf')
+    def path_total_cost(self, current_start: int) -> float:
+        return float(self.g[current_start]) if np.isfinite(self.g[current_start]) else self.inf
 
 
 class AStarPlanner:
-    """
-    传统 A* 全局路径规划器（对照组 — 静态A*规划）
-    每次需要重规划时都从头开始搜索
-    """
+    """Conventional A* full replanning baseline."""
 
     def __init__(self, energy_map: EnergyMap):
         self.em = energy_map
         self.n_nodes = len(energy_map.nodes)
 
-    def plan(self, start: int, goal: int,
-             blocked_edges: set | None = None) -> Tuple[bool, List[int], int, float]:
-        """
-        A* 全局搜索
+    def _heuristic(self, node_id: int, goal: int) -> float:
+        node = self.em.nodes[node_id]
+        goal_node = self.em.nodes[goal]
+        dx = float(goal_node[0] - node[0])
+        dy = float(goal_node[1] - node[1])
+        dz = float(goal_node[2] - node[2])
+        d3d = math.sqrt(dx * dx + dy * dy + dz * dz)
+        return config.ALPHA * (d3d / config.CRUISE_SPEED)
 
-        返回:
-            (成功, 路径, 遍历节点数, 耗时ms)
-        """
-        INF = float('inf')
-        dist = np.full(self.n_nodes, INF, dtype=float)
-        prev_node = np.full(self.n_nodes, -1, dtype=int)
+    def plan(
+        self,
+        start: int,
+        goal: int,
+        blocked_edges: set[int] | None = None,
+    ) -> Tuple[bool, List[int], int, float]:
+        blocked_edges = blocked_edges or set()
+        inf = float("inf")
+        dist = np.full(self.n_nodes, inf, dtype=float)
+        prev = np.full(self.n_nodes, -1, dtype=int)
         closed = np.zeros(self.n_nodes, dtype=bool)
 
         dist[start] = 0.0
-        heap = [(self._heuristic(start, goal), 0.0, start)]
+        heap: list[Tuple[float, float, int]] = [(self._heuristic(start, goal), 0.0, start)]
         expanded = 0
 
-        if blocked_edges is None:
-            blocked_edges = set()
-
         t0 = time.perf_counter()
-
         while heap:
-            f, g, u = heapq.heappop(heap)
-            if g > dist[u] + 1e-9:
+            _, g_cost, node_id = heapq.heappop(heap)
+            if g_cost > dist[node_id] + 1e-9 or closed[node_id]:
                 continue
-            if closed[u]:
-                continue
-            closed[u] = True
+            closed[node_id] = True
             expanded += 1
 
-            if u == goal:
+            if node_id == goal:
                 break
 
-            for v, eid in self.em.adj.get(u, []):
-                if eid in blocked_edges:
+            for succ, edge_id in self.em.adj.get(node_id, []):
+                if edge_id in blocked_edges:
                     continue
-                c = self.em.get_edge_cost(eid)
-                ng = g + c
-                if ng + 1e-9 < dist[v]:
-                    dist[v] = ng
-                    prev_node[v] = u
-                    heapq.heappush(heap, (ng + self._heuristic(v, goal), ng, v))
-
-        t1 = time.perf_counter()
-        elapsed_ms = (t1 - t0) * 1000.0
+                next_cost = g_cost + self.em.get_edge_cost(edge_id)
+                if next_cost + 1e-9 < dist[succ]:
+                    dist[succ] = next_cost
+                    prev[succ] = node_id
+                    heapq.heappush(heap, (next_cost + self._heuristic(succ, goal), next_cost, succ))
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
         if not np.isfinite(dist[goal]):
             return False, [], expanded, elapsed_ms
 
-        # 回溯路径
         path = [goal]
-        cur = goal
-        seen = set()
-        while cur != start:
-            seen.add(cur)
-            p = int(prev_node[cur])
-            if p < 0 or p in seen:
+        current = goal
+        seen = {goal}
+        while current != start:
+            predecessor = int(prev[current])
+            if predecessor < 0 or predecessor in seen:
                 return False, [], expanded, elapsed_ms
-            path.append(p)
-            cur = p
+            path.append(predecessor)
+            current = predecessor
+            seen.add(current)
         path.reverse()
         return True, path, expanded, elapsed_ms
-
-    def _heuristic(self, s: int, goal: int) -> float:
-        """可容许启发式：直线距离 × α"""
-        n_s = self.em.nodes[s]
-        n_g = self.em.nodes[goal]
-        dx = n_g[0] - n_s[0]
-        dy = n_g[1] - n_s[1]
-        dz = n_g[2] - n_s[2]
-        d3d = math.sqrt(dx * dx + dy * dy + dz * dz)
-        return config.ALPHA * d3d
