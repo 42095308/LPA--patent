@@ -95,7 +95,19 @@ class EMSController(_BaseEMS):
             return 0.0
 
         lookahead_t = current_time_s + config.FC_TAU * config.EMS_MESSAGE_LOOKAHEAD_FACTOR
-        return float(np.interp(lookahead_t, predict_time, predict_power, left=predict_power[0], right=predict_power[-1]))
+        window_end_t = lookahead_t + config.FC_PREVIEW_AVG_WINDOW_S
+        mask = (predict_time >= lookahead_t - 1e-9) & (predict_time <= window_end_t + 1e-9)
+        if np.any(mask):
+            return float(np.mean(predict_power[mask]))
+        return float(
+            np.interp(
+                lookahead_t,
+                predict_time,
+                predict_power,
+                left=predict_power[0],
+                right=predict_power[-1],
+            )
+        )
 
     def simulate(
         self,
@@ -120,10 +132,13 @@ class EMSController(_BaseEMS):
             if p_future <= 0.0:
                 p_future = float(p_demand)
 
+            preview_up = max(0.0, p_future - float(p_demand))
             fc_target = min(
-                p_future * config.FC_TARGET_DEMAND_MARGIN,
+                float(p_demand) * config.FC_TARGET_DEMAND_MARGIN + config.FC_PREVIEW_GAIN * preview_up,
                 config.FC_RATED_POWER * config.FC_TARGET_POWER_CAP_RATIO,
             )
+            if abs(fc_target - self.fc_power) < config.FC_TARGET_DEADBAND_W:
+                fc_target = self.fc_power
 
             fc_prev = self.fc_power
             max_change = config.FC_RAMP_LIMIT * dt

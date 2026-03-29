@@ -73,6 +73,22 @@ class EventRecord:
     new_path_length_m: float
     new_path_nodes: List[int]
     structured_message: Dict[str, object] | None
+    t2_changed_nodes: int = 0
+    t4_changed_nodes: int = 0
+    planner_nodes_expanded: int = 0
+    lpa_nodes_expanded: int = 0
+    lpa_heap_rekey_count: int = 0
+    compute_shortest_path_ms: float = 0.0
+    path_extract_ms: float = 0.0
+
+
+@dataclass
+class PendingPlan:
+    replanning_id: int
+    activation_time_s: float
+    path_nodes: List[int]
+    profile_history_index: int
+    event_record_index: int | None = None
 
 
 @dataclass
@@ -101,6 +117,7 @@ class ChainState:
     online_fc_stress_index: float = 0.0
     estimated_soh: float = config.INITIAL_SOH
     force_planner_reset: bool = False
+    pending_plan: PendingPlan | None = None
 
 
 def path_length_m(energy_map: EnergyMap, path_nodes: List[int]) -> float:
@@ -186,6 +203,115 @@ def build_schedule_from_path(
     return schedule, snap_error_m
 
 
+def build_profile_payload(
+    energy_map: EnergyMap,
+    path_nodes: List[int],
+    execute_time_s: float,
+) -> Dict[str, object]:
+    geometry = extract_geometry(energy_map, path_nodes)
+    raw_time, raw_power = compute_power_sequence(energy_map, path_nodes, start_time_s=0.0)
+    smooth_time, smooth_power = smooth_power_bspline(raw_time, raw_power)
+    feature_vector = extract_feature_vector(smooth_time, smooth_power, geometry)
+    absolute_time = smooth_time + execute_time_s if len(smooth_time) else smooth_time
+    return {
+        "geometry": geometry,
+        "feature_vector": feature_vector,
+        "time_s": [float(t) for t in absolute_time.tolist()],
+        "power_w": [float(p) for p in smooth_power.tolist()],
+        "max_dp_req_w": max_dp_req_w(smooth_power),
+        "t_window": float(smooth_time[-1]) if len(smooth_time) else 0.0,
+        "path_length_m": path_length_m(energy_map, path_nodes),
+    }
+
+
+def apply_schedule_from_path(
+    chain: ChainState,
+    current_xyz: Tuple[float, float, float],
+    path_nodes: List[int],
+) -> float:
+    chain.schedule, snap_error_m = build_schedule_from_path(
+        chain.energy_map,
+        current_xyz,
+        path_nodes,
+        hold_duration_s=0.0,
+    )
+    chain.flight_state.path_nodes = list(path_nodes)
+    chain.flight_state.segment_index = 0
+    chain.flight_state.segment_elapsed_s = 0.0
+    chain.flight_state.remaining_path_nodes = list(path_nodes)
+    return snap_error_m
+
+
+def select_activation_path(
+    energy_map: EnergyMap,
+    current_xyz: Tuple[float, float, float],
+    path_nodes: List[int],
+) -> List[int]:
+    if not path_nodes:
+        return []
+
+    current = np.array(current_xyz, dtype=float)
+    distances = [
+        float(np.linalg.norm(np.array(energy_map.position_from_node(node_id), dtype=float) - current))
+        for node_id in path_nodes
+    ]
+    best_idx = int(np.argmin(np.asarray(distances, dtype=float)))
+    return list(path_nodes[best_idx:])
+
+
+def activate_pending_plan(chain: ChainState) -> None:
+    pending = chain.pending_plan
+    if pending is None:
+        return
+
+    activation_path: List[int] = []
+    if chain.lpa_planner is not None:
+        activation_path = chain.lpa_planner.extract_path(chain.flight_state.current_node_id)
+        if not activation_path or activation_path[0] != chain.flight_state.current_node_id:
+            found = chain.lpa_planner.compute_shortest_path(chain.flight_state.current_node_id)
+            if found:
+                activation_path = chain.lpa_planner.extract_path(chain.flight_state.current_node_id)
+
+    if not activation_path:
+        activation_path = select_activation_path(
+            chain.energy_map,
+            chain.flight_state.current_xyz,
+            pending.path_nodes,
+        )
+    snap_error_m = apply_schedule_from_path(
+        chain,
+        tuple(chain.flight_state.current_xyz),
+        activation_path,
+    )
+
+    profile_payload = build_profile_payload(
+        chain.energy_map,
+        activation_path,
+        pending.activation_time_s,
+    )
+    profile_entry = chain.power_profile_history[pending.profile_history_index]
+    profile_entry["predicted_path_nodes"] = list(profile_entry["path_nodes"])
+    profile_entry["predicted_path_length_m"] = float(profile_entry["path_length_m"])
+    profile_entry["predicted_time_s"] = list(profile_entry["time_s"])
+    profile_entry["predicted_power_w"] = list(profile_entry["power_w"])
+    profile_entry["activated_from_pending"] = True
+    profile_entry["activation_time_s"] = float(pending.activation_time_s)
+    profile_entry["path_nodes"] = list(activation_path)
+    profile_entry["path_length_m"] = float(profile_payload["path_length_m"])
+    profile_entry["time_s"] = list(profile_payload["time_s"])
+    profile_entry["power_w"] = list(profile_payload["power_w"])
+    profile_entry["max_dp_req_w"] = float(profile_payload["max_dp_req_w"])
+    profile_entry["feature_vector"] = profile_payload["feature_vector"]
+
+    if pending.event_record_index is not None:
+        event_record = chain.event_records[pending.event_record_index]
+        event_record.snap_error_m = snap_error_m
+        event_record.new_path_nodes = list(activation_path)
+        event_record.new_path_length_m = float(profile_payload["path_length_m"])
+
+    chain.pending_plan = None
+
+
 def append_power_samples(chain: ChainState, duration_s: float, power_w: float) -> None:
     if duration_s <= 1e-9:
         return
@@ -209,10 +335,7 @@ def append_power_samples(chain: ChainState, duration_s: float, power_w: float) -
         prev_power = float(power_w)
 
 
-def advance_chain_to_time(chain: ChainState, target_time_s: float) -> None:
-    if chain.completed:
-        return
-
+def _consume_schedule_until(chain: ChainState, target_time_s: float) -> None:
     remaining = target_time_s - chain.flight_state.elapsed_time_s
     while remaining > 1e-9 and chain.schedule:
         segment = chain.schedule[0]
@@ -261,12 +384,46 @@ def advance_chain_to_time(chain: ChainState, target_time_s: float) -> None:
     if not chain.schedule and chain.flight_state.current_node_id == chain.goal_node_id:
         chain.completed = True
         chain.flight_state.remaining_path_nodes = [chain.goal_node_id]
+        chain.pending_plan = None
+
+
+def advance_chain_to_time(chain: ChainState, target_time_s: float) -> None:
+    if chain.completed and chain.pending_plan is None:
+        return
+
+    while chain.pending_plan is not None:
+        activation_time_s = chain.pending_plan.activation_time_s
+        if activation_time_s > target_time_s + 1e-9:
+            break
+        if chain.flight_state.elapsed_time_s < activation_time_s - 1e-9:
+            _consume_schedule_until(chain, activation_time_s)
+        if chain.completed:
+            chain.pending_plan = None
+            return
+        if chain.pending_plan is not None and not chain.schedule and chain.flight_state.elapsed_time_s < activation_time_s - 1e-9:
+            chain.pending_plan.activation_time_s = chain.flight_state.elapsed_time_s
+            activation_time_s = chain.pending_plan.activation_time_s
+        if chain.flight_state.elapsed_time_s >= activation_time_s - 1e-9:
+            activate_pending_plan(chain)
+
+    _consume_schedule_until(chain, target_time_s)
 
 
 def max_dp_req_w(power_arr: np.ndarray) -> float:
     if len(power_arr) < 2:
         return 0.0
     return float(np.max(np.abs(np.diff(power_arr))))
+
+
+def robust_dp_req_w(power_arr: np.ndarray, percentile: float) -> float:
+    if len(power_arr) < 2:
+        return 0.0
+    diffs = np.abs(np.diff(power_arr))
+    if len(diffs) == 0:
+        return 0.0
+    if len(diffs) <= 2:
+        return float(np.max(diffs))
+    return float(np.percentile(diffs, percentile))
 
 
 def mean_or_zero(values: List[float]) -> float:
@@ -325,16 +482,42 @@ def apply_t2_trigger(chain: ChainState, event_id: int) -> TriggerDecision:
         remaining_path_snapshot(chain),
         config.EVENT_CENTER_LOOKAHEAD_M,
     )
-    affected_edges = chain.energy_map.update_wind_field(
+    update_stats = chain.energy_map.update_wind_field(
         center_xy,
         config.WINDSHEAR_AHEAD_M,
         config.WIND_SHEAR,
     )
-    if chain.lpa_planner is not None and not chain.force_planner_reset:
-        for edge_id in affected_edges:
-            chain.lpa_planner.update_edge_cost(edge_id, chain.energy_map.get_edge_cost(edge_id))
-
-    triggered = len(affected_edges) > 0
+    path_candidate_edges = chain.energy_map.find_edges_near_path(
+        chain.flight_state.current_xyz,
+        remaining_path_snapshot(chain),
+        config.T2_LOCAL_REFRESH_RADIUS_M,
+        max_waypoints=config.T2_LOCAL_MAX_WAYPOINTS,
+    )
+    path_edge_set = set(path_candidate_edges)
+    candidate_edge_ids = list(update_stats["candidate_edge_ids"])
+    old_costs = list(update_stats["old_costs"])
+    new_costs = list(update_stats["new_costs"])
+    if path_edge_set:
+        filtered_indices = [idx for idx, edge_id in enumerate(candidate_edge_ids) if edge_id in path_edge_set]
+        candidate_edge_ids = [candidate_edge_ids[idx] for idx in filtered_indices]
+        old_costs = [old_costs[idx] for idx in filtered_indices]
+        new_costs = [new_costs[idx] for idx in filtered_indices]
+    else:
+        candidate_edge_ids = []
+        old_costs = []
+        new_costs = []
+    delta_filter = chain.energy_map.filter_edge_cost_delta_values(
+        candidate_edge_ids,
+        np.asarray(old_costs, dtype=float),
+        np.asarray(new_costs, dtype=float),
+        config.T2_COST_DELTA_RATIO_THRESHOLD,
+        config.T2_COST_DELTA_ABS_THRESHOLD,
+    )
+    affected_edges = delta_filter["edge_ids"]
+    triggered = len(affected_edges) >= config.T2_MIN_AFFECTED_EDGES
+    updated_vertices = 0
+    if triggered and chain.lpa_planner is not None and not chain.force_planner_reset:
+        updated_vertices = chain.lpa_planner.update_edge_costs(affected_edges)
     return TriggerDecision(
         trigger_id="T2",
         triggered=triggered,
@@ -343,6 +526,17 @@ def apply_t2_trigger(chain: ChainState, event_id: int) -> TriggerDecision:
             "event_id": event_id,
             "center_xy": [float(center_xy[0]), float(center_xy[1])],
             "affected_edges": len(affected_edges),
+            "updated_vertices": int(updated_vertices),
+            "candidate_edges": int(update_stats["candidate_edges"]),
+            "path_candidate_edges": int(len(path_candidate_edges)),
+            "path_filtered_candidates": int(len(candidate_edge_ids)),
+            "delta_filtered_edges": int(delta_filter["candidate_edges"]),
+            "updated_cells": int(update_stats["updated_cells"]),
+            "window_rows": int(update_stats["window_rows"]),
+            "window_cols": int(update_stats["window_cols"]),
+            "max_cost_delta_ratio": float(delta_filter["max_cost_delta_ratio"]),
+            "max_cost_delta_abs": float(delta_filter["max_cost_delta_abs"]),
+            "min_affected_edges_threshold": int(config.T2_MIN_AFFECTED_EDGES),
             "wind_speed_mps": config.WIND_SHEAR,
             "radius_m": config.WINDSHEAR_AHEAD_M,
         },
@@ -364,13 +558,32 @@ def local_schedule_dp_req_w(chain: ChainState) -> float:
     return max_dp_req_w(np.asarray(powers, dtype=float))
 
 
+def future_profile_dp_req_w(chain: ChainState) -> float:
+    if not chain.power_profile_history:
+        return 0.0
+
+    profile = chain.power_profile_history[-1]
+    time_arr = np.asarray(profile.get("time_s", []), dtype=float)
+    power_arr = np.asarray(profile.get("power_w", []), dtype=float)
+    if len(time_arr) < 2 or len(power_arr) < 2:
+        return 0.0
+
+    start_t = float(chain.flight_state.elapsed_time_s)
+    end_t = start_t + config.T3_PROFILE_LOOKAHEAD_S
+    mask = (time_arr >= start_t - 1e-9) & (time_arr <= end_t + 1e-9)
+    future_power = power_arr[mask]
+    if len(future_power) < 2:
+        future_idx = np.flatnonzero(time_arr >= start_t - 1e-9)
+        future_power = power_arr[future_idx[: max(2, config.T3_LOOKAHEAD_SEGMENTS)]]
+    if len(future_power) < 2:
+        return 0.0
+    return robust_dp_req_w(np.asarray(future_power, dtype=float), config.T3_PROFILE_DP_PERCENTILE)
+
+
 def apply_t3_trigger(chain: ChainState, event_id: int) -> TriggerDecision:
-    profile_dp_req = 0.0
-    if chain.power_profile_history:
-        profile_dp_req = float(chain.power_profile_history[-1].get("max_dp_req_w", 0.0))
     local_dp_req = local_schedule_dp_req_w(chain)
-    observed_dp_req = float(chain.observed_max_dp_req_w)
-    dp_req = max(local_dp_req, profile_dp_req, observed_dp_req)
+    profile_dp_req = future_profile_dp_req_w(chain)
+    dp_req = max(local_dp_req, profile_dp_req)
     triggered = dp_req > config.FC_DP_MAX_STEP
     reason = "dp_req_threshold_exceeded" if triggered else "dp_req_within_limit"
     return TriggerDecision(
@@ -380,8 +593,7 @@ def apply_t3_trigger(chain: ChainState, event_id: int) -> TriggerDecision:
         metadata={
             "event_id": event_id,
             "local_dp_req_w": local_dp_req,
-            "profile_dp_req_w": profile_dp_req,
-            "observed_dp_req_w": observed_dp_req,
+            "future_profile_dp_req_w": profile_dp_req,
             "threshold_w": config.FC_DP_MAX_STEP,
         },
     )
@@ -412,6 +624,7 @@ def apply_t4_trigger(chain: ChainState, event_id: int) -> TriggerDecision:
 
     planner_action = "none"
     local_refreshed_edges = 0
+    updated_vertices = 0
     chain.force_planner_reset = False
     if triggered and abs(previous_soh - estimated_soh) > 1e-9:
         chain.energy_map.set_soh(estimated_soh)
@@ -437,8 +650,7 @@ def apply_t4_trigger(chain: ChainState, event_id: int) -> TriggerDecision:
                     config.T4_COST_DELTA_RATIO_THRESHOLD,
                     config.T4_COST_DELTA_ABS_THRESHOLD,
                 )
-                for edge_id in delta_filter["edge_ids"]:
-                    chain.lpa_planner.update_edge_cost(edge_id)
+                updated_vertices = chain.lpa_planner.update_edge_costs(delta_filter["edge_ids"])
                 local_refreshed_edges = int(delta_filter["updated_edges"])
                 planner_action = "local_refresh" if local_refreshed_edges > 0 else "local_refresh_filtered"
         else:
@@ -464,6 +676,7 @@ def apply_t4_trigger(chain: ChainState, event_id: int) -> TriggerDecision:
             "planner_action": planner_action,
             "candidate_local_edges": int(delta_filter["candidate_edges"]) if "delta_filter" in locals() else 0,
             "local_refreshed_edges": local_refreshed_edges,
+            "updated_vertices": int(updated_vertices),
             "max_cost_delta_ratio": float(delta_filter["max_cost_delta_ratio"]) if "delta_filter" in locals() else 0.0,
             "max_cost_delta_abs": float(delta_filter["max_cost_delta_abs"]) if "delta_filter" in locals() else 0.0,
         },
@@ -486,35 +699,51 @@ def evaluate_triggers(chain: ChainState, event_id: int) -> List[TriggerDecision]
     return decisions
 
 
-def compute_chain_path(chain: ChainState, current_node: int) -> Tuple[bool, List[int], float]:
+def compute_chain_path(chain: ChainState, current_node: int) -> Tuple[bool, List[int], float, Dict[str, float]]:
     if chain.lpa_planner is not None:
         if chain.force_planner_reset:
             chain.lpa_planner = LPAStar(chain.energy_map, chain.goal_node_id)
             chain.force_planner_reset = False
-        t0 = time.perf_counter()
+        key_shift_before = chain.lpa_planner.key_shift_count
+        t_search = time.perf_counter()
         found = chain.lpa_planner.compute_shortest_path(current_node)
+        compute_shortest_path_ms = (time.perf_counter() - t_search) * 1000.0
+        t_extract = time.perf_counter()
         new_path = chain.lpa_planner.extract_path(current_node) if found else []
-        planning_latency_ms = (time.perf_counter() - t0) * 1000.0
-        return found, new_path, planning_latency_ms
+        path_extract_ms = (time.perf_counter() - t_extract) * 1000.0
+        planning_latency_ms = compute_shortest_path_ms + path_extract_ms
+        return found, new_path, planning_latency_ms, {
+            "planner_nodes_expanded": int(chain.lpa_planner.nodes_expanded),
+            "lpa_nodes_expanded": int(chain.lpa_planner.nodes_expanded),
+            "lpa_heap_rekey_count": int(chain.lpa_planner.key_shift_count - key_shift_before),
+            "compute_shortest_path_ms": float(compute_shortest_path_ms),
+            "path_extract_ms": float(path_extract_ms),
+        }
 
     if chain.astar_planner is not None:
-        t0 = time.perf_counter()
-        found, new_path, _, _ = chain.astar_planner.plan(current_node, chain.goal_node_id)
-        planning_latency_ms = (time.perf_counter() - t0) * 1000.0
-        return found, new_path, planning_latency_ms
+        found, new_path, expanded, compute_shortest_path_ms = chain.astar_planner.plan(current_node, chain.goal_node_id)
+        return found, new_path, compute_shortest_path_ms, {
+            "planner_nodes_expanded": int(expanded),
+            "lpa_nodes_expanded": 0,
+            "lpa_heap_rekey_count": 0,
+            "compute_shortest_path_ms": float(compute_shortest_path_ms),
+            "path_extract_ms": 0.0,
+        }
 
     raise RuntimeError(f"Chain {chain.name} has no planner.")
 
 
 def assert_event_record(chain: ChainState, event_record: EventRecord) -> None:
     trigger_ids = [decision.trigger_id for decision in event_record.decisions]
+    any_triggered = any(decision.triggered for decision in event_record.decisions)
     assert trigger_ids == ["T1", "T2", "T3", "T4"], f"Missing triggers in event {event_record.event_id}."
     assert event_record.t2_trigger_s <= event_record.t3_message_ready_s + 1e-9
     assert event_record.t3_message_ready_s <= event_record.t4_ems_ready_s + 1e-9
     assert event_record.t4_ems_ready_s <= event_record.t5_flight_execute_s + 1e-9
     if chain.name == "proposed":
         assert event_record.structured_message is not None, "Proposed event missing structured message."
-        assert event_record.t4_ems_ready_s - event_record.t3_message_ready_s >= config.FC_TAU - 1e-9
+        if any_triggered:
+            assert event_record.t4_ems_ready_s - event_record.t3_message_ready_s >= config.FC_TAU - 1e-9
     else:
         assert event_record.structured_message is None, "Traditional chain must not depend on structured message."
 
@@ -530,9 +759,16 @@ def run_planning_stage(
     current_xyz = tuple(chain.flight_state.current_xyz)
     decisions = trigger_decisions or []
     triggered = (not is_event) or any(decision.triggered for decision in decisions)
+    planner_stats = {
+        "planner_nodes_expanded": 0,
+        "lpa_nodes_expanded": 0,
+        "lpa_heap_rekey_count": 0,
+        "compute_shortest_path_ms": 0.0,
+        "path_extract_ms": 0.0,
+    }
 
     if triggered:
-        found, new_path, planning_latency_ms = compute_chain_path(chain, current_node)
+        found, new_path, planning_latency_ms, planner_stats = compute_chain_path(chain, current_node)
         if not found or not new_path:
             raise RuntimeError(f"{chain.name} planner failed at stage {replanning_id}.")
     else:
@@ -540,49 +776,46 @@ def run_planning_stage(
         planning_latency_ms = 0.0
 
     t2_trigger_s = trigger_time_s if is_event else 0.0
-    t3_message_ready_s = trigger_time_s + planning_latency_ms / 1000.0 if is_event else 0.0
-    if chain.name == "proposed" and is_event:
+    t3_message_ready_s = trigger_time_s + config.CONTROL_MESSAGE_DELAY_S if is_event else 0.0
+    wait_for_activation = chain.name == "proposed" and is_event and triggered
+    if wait_for_activation:
         t4_ems_ready_s = t3_message_ready_s + config.FC_TAU
     else:
         t4_ems_ready_s = t3_message_ready_s
     t5_flight_execute_s = t4_ems_ready_s
-    hold_duration_s = max(0.0, t5_flight_execute_s - trigger_time_s) if is_event else 0.0
-    chain_latency_ms = hold_duration_s * 1000.0
+    chain_latency_ms = (
+        max(0.0, t5_flight_execute_s - trigger_time_s) * 1000.0
+        if is_event
+        else 0.0
+    )
 
-    geometry = extract_geometry(chain.energy_map, new_path)
-    raw_time, raw_power = compute_power_sequence(chain.energy_map, new_path, start_time_s=0.0)
-    smooth_time, smooth_power = smooth_power_bspline(raw_time, raw_power)
-    feature_vector = extract_feature_vector(smooth_time, smooth_power, geometry)
-    absolute_time = smooth_time + t5_flight_execute_s if len(smooth_time) else smooth_time
-    profile_max_dp_req = max_dp_req_w(smooth_power)
+    profile_payload = build_profile_payload(
+        chain.energy_map,
+        new_path,
+        t5_flight_execute_s,
+    )
 
     structured_message = None
     if chain.name == "proposed":
         structured_message = build_structured_message(
             timestamp=t3_message_ready_s,
             replanning_id=replanning_id,
-            feature_vec=feature_vector,
-            time_arr=absolute_time,
-            power_arr=smooth_power,
-            t_window=float(smooth_time[-1]) if len(smooth_time) else 0.0,
+            feature_vec=profile_payload["feature_vector"],
+            time_arr=np.asarray(profile_payload["time_s"], dtype=float),
+            power_arr=np.asarray(profile_payload["power_w"], dtype=float),
+            t_window=float(profile_payload["t_window"]),
         )
         chain.structured_messages.append(structured_message)
 
-    chain.schedule, snap_error_m = build_schedule_from_path(
-        chain.energy_map,
-        current_xyz,
-        new_path,
-        hold_duration_s,
-    )
-    chain.flight_state.path_nodes = list(new_path)
-    chain.flight_state.segment_index = 0
-    chain.flight_state.segment_elapsed_s = 0.0
-    chain.flight_state.remaining_path_nodes = list(new_path)
+    snap_error_m = 0.0
+    if not wait_for_activation:
+        snap_error_m = apply_schedule_from_path(chain, current_xyz, new_path)
+
     chain.planning_latency_ms.append(planning_latency_ms)
     if is_event:
         chain.chain_latency_ms.append(chain_latency_ms)
 
-    path_len = path_length_m(chain.energy_map, new_path)
+    path_len = float(profile_payload["path_length_m"])
     chain.power_profile_history.append(
         {
             "replanning_id": replanning_id,
@@ -592,10 +825,10 @@ def run_planning_stage(
             "decisions": [asdict(decision) for decision in decisions],
             "path_nodes": list(new_path),
             "path_length_m": path_len,
-            "time_s": [float(t) for t in absolute_time.tolist()],
-            "power_w": [float(p) for p in smooth_power.tolist()],
-            "max_dp_req_w": profile_max_dp_req,
-            "feature_vector": feature_vector,
+            "time_s": list(profile_payload["time_s"]),
+            "power_w": list(profile_payload["power_w"]),
+            "max_dp_req_w": float(profile_payload["max_dp_req_w"]),
+            "feature_vector": profile_payload["feature_vector"],
             "structured_message": structured_message,
         }
     )
@@ -623,9 +856,43 @@ def run_planning_stage(
         new_path_length_m=path_len,
         new_path_nodes=list(new_path),
         structured_message=structured_message,
+        t2_changed_nodes=int(
+            next(
+                (
+                    decision.metadata.get("updated_vertices", 0)
+                    for decision in decisions
+                    if decision.trigger_id == "T2"
+                ),
+                0,
+            )
+        ),
+        t4_changed_nodes=int(
+            next(
+                (
+                    decision.metadata.get("updated_vertices", 0)
+                    for decision in decisions
+                    if decision.trigger_id == "T4"
+                ),
+                0,
+            )
+        ),
+        planner_nodes_expanded=int(planner_stats["planner_nodes_expanded"]),
+        lpa_nodes_expanded=int(planner_stats["lpa_nodes_expanded"]),
+        lpa_heap_rekey_count=int(planner_stats["lpa_heap_rekey_count"]),
+        compute_shortest_path_ms=float(planner_stats["compute_shortest_path_ms"]),
+        path_extract_ms=float(planner_stats["path_extract_ms"]),
     )
     assert_event_record(chain, event_record)
     chain.event_records.append(event_record)
+
+    if wait_for_activation:
+        chain.pending_plan = PendingPlan(
+            replanning_id=replanning_id,
+            activation_time_s=t5_flight_execute_s,
+            path_nodes=list(new_path),
+            profile_history_index=len(chain.power_profile_history) - 1,
+            event_record_index=len(chain.event_records) - 1,
+        )
 
 
 def initialize_chain(
@@ -669,6 +936,11 @@ def initialize_chain(
 def build_chain_results(chain: ChainState) -> Dict[str, object]:
     time_arr = np.array(chain.executed_time_s, dtype=float)
     power_arr = np.array(chain.executed_power_w, dtype=float)
+    event_planning_latency_ms = [event.planning_latency_ms for event in chain.event_records]
+    event_chain_latency_ms = [event.chain_latency_ms for event in chain.event_records]
+    total_pre_adjust_time_s = sum(
+        max(0.0, event.t4_ems_ready_s - event.t3_message_ready_s) for event in chain.event_records
+    )
 
     if chain.name == "proposed":
         ems_result = EMSController().simulate(time_arr, power_arr, chain.structured_messages)
@@ -684,7 +956,10 @@ def build_chain_results(chain: ChainState) -> Dict[str, object]:
         "executed_distance_m": chain.executed_distance_m,
         "avg_planning_latency_ms": mean_or_zero(chain.planning_latency_ms),
         "avg_chain_latency_ms": mean_or_zero(chain.chain_latency_ms),
+        "avg_event_planning_latency_ms": mean_or_zero(event_planning_latency_ms),
+        "avg_event_chain_latency_ms": mean_or_zero(event_chain_latency_ms),
         "initial_plan_ms": chain.initial_plan_ms,
+        "total_pre_adjust_time_s": float(total_pre_adjust_time_s),
         "max_dp_req_w": max_dp_req_w(power_arr),
         "observed_max_dp_req_w": float(chain.observed_max_dp_req_w),
         "estimated_soh_end": float(chain.estimated_soh),
@@ -714,6 +989,16 @@ def build_comparison(proposed_results: Dict[str, object], traditional_results: D
         "planning_speedup_ratio": (
             traditional_results["avg_planning_latency_ms"] / proposed_results["avg_planning_latency_ms"]
             if proposed_results["avg_planning_latency_ms"] > 0.0
+            else 0.0
+        ),
+        "event_speedup_ratio": (
+            traditional_results["avg_event_chain_latency_ms"] / proposed_results["avg_event_chain_latency_ms"]
+            if proposed_results["avg_event_chain_latency_ms"] > 0.0
+            else 0.0
+        ),
+        "event_planning_speedup_ratio": (
+            traditional_results["avg_event_planning_latency_ms"] / proposed_results["avg_event_planning_latency_ms"]
+            if proposed_results["avg_event_planning_latency_ms"] > 0.0
             else 0.0
         ),
     }
@@ -859,10 +1144,23 @@ def run_scenario(
                     f"latency={chain.chain_latency_ms[-1]:.1f} ms, triggers=[{decision_summary}]"
                 )
 
-    while not proposed.completed and proposed.schedule:
-        advance_chain_to_time(proposed, proposed.flight_state.elapsed_time_s + proposed.schedule[0].duration_s)
-    while not traditional.completed and traditional.schedule:
-        advance_chain_to_time(traditional, traditional.flight_state.elapsed_time_s + traditional.schedule[0].duration_s)
+    while not proposed.completed and (proposed.schedule or proposed.pending_plan is not None):
+        if proposed.pending_plan is not None:
+            next_target = proposed.pending_plan.activation_time_s
+            if proposed.schedule:
+                next_target = min(next_target, proposed.flight_state.elapsed_time_s + proposed.schedule[0].duration_s)
+        else:
+            next_target = proposed.flight_state.elapsed_time_s + proposed.schedule[0].duration_s
+        advance_chain_to_time(proposed, next_target)
+
+    while not traditional.completed and (traditional.schedule or traditional.pending_plan is not None):
+        if traditional.pending_plan is not None:
+            next_target = traditional.pending_plan.activation_time_s
+            if traditional.schedule:
+                next_target = min(next_target, traditional.flight_state.elapsed_time_s + traditional.schedule[0].duration_s)
+        else:
+            next_target = traditional.flight_state.elapsed_time_s + traditional.schedule[0].duration_s
+        advance_chain_to_time(traditional, next_target)
 
     proposed_results = build_chain_results(proposed)
     traditional_results = build_chain_results(traditional)

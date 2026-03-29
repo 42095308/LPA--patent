@@ -20,6 +20,7 @@ class LPAStar:
         self.em = energy_map
         self.goal = goal
         self.current_start = goal
+        self.km = 0.0
         self.n_nodes = len(energy_map.nodes)
         self.inf = float("inf")
 
@@ -33,24 +34,28 @@ class LPAStar:
 
         self.nodes_expanded = 0
         self.expanded_nodes_list: List[int] = []
+        self.key_shift_count = 0
 
         self._push(goal, self._calc_key(goal))
 
     def _get_edge_cost(self, edge_id: int) -> float:
         return self.em.get_edge_cost(edge_id)
 
-    def _heuristic(self, node_id: int) -> float:
-        node = self.em.nodes[node_id]
-        start = self.em.nodes[self.current_start]
-        dx = float(start[0] - node[0])
-        dy = float(start[1] - node[1])
-        dz = float(start[2] - node[2])
+    def _heuristic_between(self, node_a: int, node_b: int) -> float:
+        source = self.em.nodes[node_a]
+        target = self.em.nodes[node_b]
+        dx = float(target[0] - source[0])
+        dy = float(target[1] - source[1])
+        dz = float(target[2] - source[2])
         d3d = math.sqrt(dx * dx + dy * dy + dz * dz)
         return config.ALPHA * (d3d / config.CRUISE_SPEED)
 
+    def _heuristic(self, node_id: int) -> float:
+        return self._heuristic_between(self.current_start, node_id)
+
     def _calc_key(self, node_id: int) -> Tuple[float, float]:
         base = min(self.g[node_id], self.rhs[node_id])
-        return (base + self._heuristic(node_id), base)
+        return (base + self._heuristic(node_id) + self.km, base)
 
     def _push(self, node_id: int, key: Tuple[float, float]) -> None:
         self._counter += 1
@@ -75,13 +80,6 @@ class LPAStar:
             heapq.heappop(self._heap)
         return (self.inf, self.inf)
 
-    def _rekey_open_set(self) -> None:
-        nodes = list(self._in_heap.keys())
-        self._heap = []
-        self._in_heap = {}
-        for node_id in nodes:
-            self._push(node_id, self._calc_key(node_id))
-
     def update_vertex(self, node_id: int) -> None:
         if node_id != self.goal:
             best = self.inf
@@ -91,17 +89,23 @@ class LPAStar:
                     best = candidate
             self.rhs[node_id] = best
 
-        if node_id in self._in_heap:
-            del self._in_heap[node_id]
+        old_key = self._in_heap.get(node_id)
+        is_inconsistent = not math.isclose(self.g[node_id], self.rhs[node_id], rel_tol=0.0, abs_tol=1e-12)
+        if not is_inconsistent:
+            if old_key is not None:
+                del self._in_heap[node_id]
+            return
 
-        if not math.isclose(self.g[node_id], self.rhs[node_id], rel_tol=0.0, abs_tol=1e-12):
-            self._push(node_id, self._calc_key(node_id))
+        new_key = self._calc_key(node_id)
+        if old_key is None or old_key != new_key:
+            self._push(node_id, new_key)
 
     def compute_shortest_path(self, current_start: int) -> bool:
         previous_start = self.current_start
         self.current_start = current_start
-        if previous_start != current_start and self._in_heap:
-            self._rekey_open_set()
+        if previous_start != current_start:
+            self.km += self._heuristic_between(previous_start, current_start)
+            self.key_shift_count += 1
 
         self.nodes_expanded = 0
         self.expanded_nodes_list = []
@@ -143,6 +147,14 @@ class LPAStar:
         del new_cost
         node_from, _ = self.em.edges[edge_id]
         self.update_vertex(node_from)
+
+    def update_edge_costs(self, edge_ids: List[int]) -> int:
+        if not edge_ids:
+            return 0
+        changed_nodes = sorted({self.em.edges[edge_id][0] for edge_id in edge_ids})
+        for node_id in changed_nodes:
+            self.update_vertex(node_id)
+        return len(changed_nodes)
 
     def extract_path(self, current_start: int) -> List[int]:
         if not np.isfinite(self.g[current_start]):

@@ -381,36 +381,92 @@ class EnergyMap:
             "max_cost_delta_abs": float(np.max(delta_abs)) if len(delta_abs) else 0.0,
         }
 
+    @staticmethod
+    def filter_edge_cost_delta_values(
+        edge_ids: List[int],
+        old_costs: np.ndarray,
+        new_costs: np.ndarray,
+        ratio_threshold: float,
+        abs_threshold: float,
+    ) -> Dict[str, object]:
+        if not edge_ids:
+            return {
+                "edge_ids": [],
+                "candidate_edges": 0,
+                "updated_edges": 0,
+                "max_cost_delta_ratio": 0.0,
+                "max_cost_delta_abs": 0.0,
+            }
+
+        idx = np.asarray(edge_ids, dtype=int)
+        old_cost = np.asarray(old_costs, dtype=float)
+        new_cost = np.asarray(new_costs, dtype=float)
+        delta_abs = np.abs(new_cost - old_cost)
+        delta_ratio = delta_abs / np.maximum(old_cost, 1e-9)
+        mask = (delta_ratio >= ratio_threshold) | (delta_abs >= abs_threshold)
+        filtered_ids = idx[mask].astype(int).tolist()
+
+        return {
+            "edge_ids": filtered_ids,
+            "candidate_edges": int(len(idx)),
+            "updated_edges": int(mask.sum()),
+            "max_cost_delta_ratio": float(np.max(delta_ratio)) if len(delta_ratio) else 0.0,
+            "max_cost_delta_abs": float(np.max(delta_abs)) if len(delta_abs) else 0.0,
+        }
+
     def update_wind_field(
         self,
         region_center: Tuple[float, float],
         radius_m: float,
         new_wind_speed: float,
-    ) -> List[int]:
-        """Apply a local wind event and update only nearby edges."""
+    ) -> Dict[str, object]:
+        """Apply a local wind event and update only nearby cells and edges."""
         cx_m, cy_m = region_center
 
-        for r in range(self.dem_rows):
-            for c in range(self.dem_cols):
+        c_min = max(0, int(math.floor((cx_m - radius_m) / config.DEM_RES)))
+        c_max = min(self.dem_cols - 1, int(math.ceil((cx_m + radius_m) / config.DEM_RES)))
+        r_min = max(0, int(math.floor((self.dem_rows - 1) - (cy_m + radius_m) / config.DEM_RES)))
+        r_max = min(self.dem_rows - 1, int(math.ceil((self.dem_rows - 1) - (cy_m - radius_m) / config.DEM_RES)))
+
+        updated_cells = 0
+        for r in range(r_min, r_max + 1):
+            y_m = (self.dem_rows - 1 - r) * config.DEM_RES
+            for c in range(c_min, c_max + 1):
                 x_m = c * config.DEM_RES
-                y_m = (self.dem_rows - 1 - r) * config.DEM_RES
                 if math.hypot(x_m - cx_m, y_m - cy_m) <= radius_m:
                     self.wind_field[r, c] = new_wind_speed
+                    updated_cells += 1
 
-        affected_edges: list[int] = []
-        for edge_id, (u, v) in enumerate(self.edges):
-            mid_x, mid_y = self.edge_midpoints_xy[edge_id]
-            if math.hypot(mid_x - cx_m, mid_y - cy_m) > radius_m + config.GRID_H_RES * 2.0:
-                continue
+        candidate_edges: list[int] = []
+        if self._edge_search_tree is not None and len(self.edge_midpoints_xy):
+            candidate_edges = sorted(
+                int(edge_id)
+                for edge_id in self._edge_search_tree.query_ball_point(
+                    np.array([cx_m, cy_m], dtype=float),
+                    radius_m + config.GRID_H_RES * 2.0,
+                )
+            )
+        old_costs: list[float] = []
+        new_costs: list[float] = []
+        for edge_id in candidate_edges:
+            u, v = self.edges[edge_id]
             old_cost = self.get_edge_cost(edge_id)
             metrics = self._edge_metrics_for_nodes(u, v)
             self.edge_h2_g[edge_id] = metrics["h2_g"]
             self.edge_psi_degradation[edge_id] = metrics["psi_degradation_local"]
             self.edge_operating_cost[edge_id] = metrics["operating_cost"]
             new_cost = self.get_edge_cost(edge_id)
-            if new_cost > old_cost * config.WIND_TRIGGER_RATIO:
-                affected_edges.append(edge_id)
-        return affected_edges
+            old_costs.append(float(old_cost))
+            new_costs.append(float(new_cost))
+        return {
+            "candidate_edge_ids": candidate_edges,
+            "old_costs": old_costs,
+            "new_costs": new_costs,
+            "candidate_edges": int(len(candidate_edges)),
+            "updated_cells": int(updated_cells),
+            "window_rows": int(r_max - r_min + 1) if r_max >= r_min else 0,
+            "window_cols": int(c_max - c_min + 1) if c_max >= c_min else 0,
+        }
 
     def compute_power_for_segment(
         self,

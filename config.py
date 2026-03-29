@@ -34,10 +34,11 @@ BAT_MIN_CURRENT: float = 2.0
 
 # Control parameters
 FC_TAU: float = 5.0
+CONTROL_MESSAGE_DELAY_S: float = 0.0
 FC_DP_DT_MAX: float = 600.0
 FC_DP_MAX_STEP: float = 900.0
-FC_RAMP_LIMIT: float = 300.0
-FC_TARGET_DEMAND_MARGIN: float = 0.92
+FC_RAMP_LIMIT: float = 135.0
+FC_TARGET_DEMAND_MARGIN: float = 0.93
 FC_TARGET_POWER_CAP_RATIO: float = 0.90
 PASSIVE_BATTERY_OVERSUPPLY_RATIO: float = 1.05
 BAT_SPIKE_THRESHOLD: float = 20.0
@@ -45,12 +46,17 @@ BAT_DEGRAD_THRESHOLD: float = 15.0
 BATTERY_EQ_RESISTANCE: float = 0.05
 PASSIVE_EQ_RESISTANCE: float = 0.08
 UNDERSUPPLY_DROOP_RESISTANCE: float = 0.12
+FC_PREVIEW_GAIN: float = 0.07
+FC_PREVIEW_AVG_WINDOW_S: float = 4.0
+FC_TARGET_DEADBAND_W: float = 240.0
 FC_STRESS_POWER_STEP_REF_W: float = 120.0
 FC_STRESS_RAMP_REF_W_PER_S: float = 80.0
-WIND_TRIGGER_RATIO: float = 1.05
+WIND_TRIGGER_RATIO: float = 1.10
 WIND_TRIGGER_DELTA_COST_RATIO: float = WIND_TRIGGER_RATIO - 1.0
 EMS_MESSAGE_LOOKAHEAD_FACTOR: float = 1.0
 T3_LOOKAHEAD_SEGMENTS: int = 6
+T3_PROFILE_LOOKAHEAD_S: float = 15.0
+T3_PROFILE_DP_PERCENTILE: float = 90.0
 INITIAL_SOH: float = 0.90
 MIN_SOH: float = 0.70
 SOH_TRIGGER_THRESHOLD: float = 0.895
@@ -58,6 +64,11 @@ T4_FC_STRESS_TRIGGER: float = 20.0
 T4_HEALTH_WEIGHT_TRIGGER: float = 1.02
 T4_HEAVY_WEIGHT_DELTA: float = 0.30
 SOH_DEGRADATION_PER_FC_STRESS: float = 2.0e-4
+T2_COST_DELTA_RATIO_THRESHOLD: float = 0.19
+T2_COST_DELTA_ABS_THRESHOLD: float = 0.085
+T2_MIN_AFFECTED_EDGES: int = 4000
+T2_LOCAL_REFRESH_RADIUS_M: float = 96.0
+T2_LOCAL_MAX_WAYPOINTS: int = 4
 T4_COST_DELTA_RATIO_THRESHOLD: float = 0.01
 T4_COST_DELTA_ABS_THRESHOLD: float = 0.02
 
@@ -68,13 +79,13 @@ GRID_V_RES: float = 50.0
 DEM_RES: float = 12.5
 ALPHA: float = 1.0
 BETA: float = 0.8
-GAMMA: float = 1.5
+GAMMA: float = 0.6
 H2_COST_SCALE: float = 1000.0
 DEGRAD_CLIMB_RATE_REF_MPS: float = 3.0
 DEGRAD_HIGH_POWER_RATIO: float = 0.85
 DEGRAD_WIND_EXCESS_REF_MPS: float = 6.0
 DEGRAD_CLIMB_WEIGHT: float = 0.35
-DEGRAD_HIGH_POWER_WEIGHT: float = 0.45
+DEGRAD_HIGH_POWER_WEIGHT: float = 0.30
 DEGRAD_WIND_WEIGHT: float = 0.20
 WIND_CD_BODY: float = 0.35
 WIND_A_BODY: float = 0.12
@@ -87,7 +98,7 @@ SMOOTHING_FACTOR: float = 0.3
 INITIAL_CORRIDOR_RADIUS_M: float = 600.0
 CORRIDOR_ENDPOINT_MARGIN_M: float = 250.0
 EVENT_CENTER_LOOKAHEAD_M: float = 150.0
-T4_LOCAL_REFRESH_RADIUS_M: float = 80.0
+T4_LOCAL_REFRESH_RADIUS_M: float = 40.0
 T4_LOCAL_MAX_WAYPOINTS: int = 4
 WINDSHEAR_TIME: float = 15.0
 WINDSHEAR_AHEAD_M: float = 150.0
@@ -106,12 +117,15 @@ SWEEP_PRESETS: dict[str, dict[str, float]] = {
         "WIND_TRIGGER_RATIO": 1.02,
     },
     "current": {
-        "FC_TARGET_DEMAND_MARGIN": 0.92,
+        "FC_RAMP_LIMIT": 135.0,
+        "FC_TARGET_DEMAND_MARGIN": 0.93,
         "FC_TARGET_POWER_CAP_RATIO": 0.90,
+        "FC_PREVIEW_GAIN": 0.07,
+        "FC_TARGET_DEADBAND_W": 240.0,
         "PASSIVE_BATTERY_OVERSUPPLY_RATIO": 1.05,
         "FC_STRESS_POWER_STEP_REF_W": 120.0,
         "FC_STRESS_RAMP_REF_W_PER_S": 80.0,
-        "WIND_TRIGGER_RATIO": 1.05,
+        "WIND_TRIGGER_RATIO": 1.10,
     },
     "aggressive": {
         "FC_TARGET_DEMAND_MARGIN": 0.97,
@@ -182,11 +196,15 @@ def snapshot() -> dict[str, Any]:
         },
         "control": {
             "fc_tau_s": FC_TAU,
+            "control_message_delay_s": CONTROL_MESSAGE_DELAY_S,
             "fc_dp_dt_max_wps": FC_DP_DT_MAX,
             "fc_dp_max_step_w": FC_DP_MAX_STEP,
             "fc_ramp_limit_wps": FC_RAMP_LIMIT,
             "fc_target_demand_margin": FC_TARGET_DEMAND_MARGIN,
             "fc_target_power_cap_ratio": FC_TARGET_POWER_CAP_RATIO,
+            "fc_preview_gain": FC_PREVIEW_GAIN,
+            "fc_preview_avg_window_s": FC_PREVIEW_AVG_WINDOW_S,
+            "fc_target_deadband_w": FC_TARGET_DEADBAND_W,
             "passive_battery_oversupply_ratio": PASSIVE_BATTERY_OVERSUPPLY_RATIO,
             "bat_spike_threshold_a": BAT_SPIKE_THRESHOLD,
             "bat_degrad_threshold_a": BAT_DEGRAD_THRESHOLD,
@@ -197,6 +215,8 @@ def snapshot() -> dict[str, Any]:
             "fc_stress_ramp_ref_wps": FC_STRESS_RAMP_REF_W_PER_S,
             "wind_trigger_ratio": WIND_TRIGGER_RATIO,
             "t3_lookahead_segments": T3_LOOKAHEAD_SEGMENTS,
+            "t3_profile_lookahead_s": T3_PROFILE_LOOKAHEAD_S,
+            "t3_profile_dp_percentile": T3_PROFILE_DP_PERCENTILE,
             "initial_soh": INITIAL_SOH,
             "min_soh": MIN_SOH,
             "soh_trigger_threshold": SOH_TRIGGER_THRESHOLD,
@@ -204,6 +224,11 @@ def snapshot() -> dict[str, Any]:
             "t4_health_weight_trigger": T4_HEALTH_WEIGHT_TRIGGER,
             "t4_heavy_weight_delta": T4_HEAVY_WEIGHT_DELTA,
             "soh_degradation_per_fc_stress": SOH_DEGRADATION_PER_FC_STRESS,
+            "t2_cost_delta_ratio_threshold": T2_COST_DELTA_RATIO_THRESHOLD,
+            "t2_cost_delta_abs_threshold": T2_COST_DELTA_ABS_THRESHOLD,
+            "t2_min_affected_edges": T2_MIN_AFFECTED_EDGES,
+            "t2_local_refresh_radius_m": T2_LOCAL_REFRESH_RADIUS_M,
+            "t2_local_max_waypoints": T2_LOCAL_MAX_WAYPOINTS,
             "t4_cost_delta_ratio_threshold": T4_COST_DELTA_RATIO_THRESHOLD,
             "t4_cost_delta_abs_threshold": T4_COST_DELTA_ABS_THRESHOLD,
         },
@@ -227,6 +252,8 @@ def snapshot() -> dict[str, Any]:
             "initial_corridor_radius_m": INITIAL_CORRIDOR_RADIUS_M,
             "corridor_endpoint_margin_m": CORRIDOR_ENDPOINT_MARGIN_M,
             "event_center_lookahead_m": EVENT_CENTER_LOOKAHEAD_M,
+            "t2_local_refresh_radius_m": T2_LOCAL_REFRESH_RADIUS_M,
+            "t2_local_max_waypoints": T2_LOCAL_MAX_WAYPOINTS,
             "t4_local_refresh_radius_m": T4_LOCAL_REFRESH_RADIUS_M,
             "t4_local_max_waypoints": T4_LOCAL_MAX_WAYPOINTS,
             "windshear_ahead_m": WINDSHEAR_AHEAD_M,

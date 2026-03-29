@@ -123,7 +123,10 @@ def extract_feature_vector(
 
     shifted_time = np.concatenate(([time_arr[0] - config.SIM_DT], time_arr))
     shifted_power = np.concatenate(([power_arr[0]], power_arr))
-    energy_j = float(np.trapz(shifted_power, shifted_time))
+    # Keep the trapezoidal integration logic independent from NumPy version changes.
+    energy_j = float(
+        np.sum(0.5 * (shifted_power[1:] + shifted_power[:-1]) * np.diff(shifted_time))
+    ) if len(shifted_time) > 1 else 0.0
     h2_g = energy_j / (0.50 * 120.0e3)
 
     return {
