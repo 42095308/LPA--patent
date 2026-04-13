@@ -1,4 +1,4 @@
-﻿"""Central configuration for the patent_python simulation."""
+"""patent_python 的统一配置。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import math
 from pathlib import Path
 from typing import Any
 
-# Paths
+# 路径配置
 PROJECT_ROOT: Path = Path(__file__).resolve().parent
 DATA_DIR: Path = PROJECT_ROOT / "data"
 RAW_DIR: Path = DATA_DIR / "raw"
@@ -21,7 +21,10 @@ SIM_RESULT_FILE: Path = OUTPUTS_DIR / "simulation_results.json"
 REPORT_TABLES_FILE: Path = OUTPUTS_DIR / "report_tables.json"
 DOC_PAYLOAD_FILE: Path = OUTPUTS_DIR / "document_payload.json"
 
-# Platform parameters
+# 运行模式
+IMPLEMENTATION_MODE: str = "spec_first"
+
+# 平台参数
 MASS: float = 8.5
 ROTOR_RADIUS: float = 0.25
 ROTOR_AREA: float = 4.0 * math.pi * ROTOR_RADIUS ** 2
@@ -31,12 +34,18 @@ BAT_CAPACITY_AH: float = 22.0
 BAT_VOLTAGE: float = 44.4
 V_BUS: float = 48.0
 BAT_MIN_CURRENT: float = 2.0
+BATTERY_CURRENT_LIMIT_INIT_A: float = 28.0
+DESCENT_POWER_FACTOR: float = 0.35
 
-# Control parameters
+# 控制参数
 FC_TAU: float = 5.0
 CONTROL_MESSAGE_DELAY_S: float = 0.0
+CONTROL_DT: float = 1.0
+TRIGGER_MIN_INTERVAL_S: float = 2.0
+EVENT_MERGE_WINDOW_S: float = 8.0
 FC_DP_DT_MAX: float = 600.0
 FC_DP_MAX_STEP: float = 900.0
+FC_DP_MAX_STEP_MIN_RATIO: float = 0.55
 FC_RAMP_LIMIT: float = 135.0
 FC_TARGET_DEMAND_MARGIN: float = 0.93
 FC_TARGET_POWER_CAP_RATIO: float = 0.90
@@ -48,9 +57,32 @@ PASSIVE_EQ_RESISTANCE: float = 0.08
 UNDERSUPPLY_DROOP_RESISTANCE: float = 0.12
 FC_PREVIEW_GAIN: float = 0.07
 FC_PREVIEW_AVG_WINDOW_S: float = 4.0
-FC_TARGET_DEADBAND_W: float = 240.0
+FC_TARGET_DEADBAND_W: float = 320.0
 FC_STRESS_POWER_STEP_REF_W: float = 120.0
 FC_STRESS_RAMP_REF_W_PER_S: float = 80.0
+PRECONDITION_POWER_TOLERANCE_W: float = 180.0
+PRECONDITION_EVENT_SCALE_T2: float = 0.50
+PRECONDITION_EVENT_SCALE_T3: float = 0.90
+PRECONDITION_EVENT_SCALE_T4: float = 0.00
+PRECONDITION_BATTERY_HEADROOM_RATIO: float = 0.015
+PRECONDITION_BATTERY_HEADROOM_A: float = 0.20
+PRECONDITION_TREND_RELEASE_EPS_W_PER_S: float = 5.0
+PRECONDITION_RELEASE_POWER_TOL_MULT_T2: float = 1.25
+PRECONDITION_RELEASE_POWER_TOL_MULT_T3: float = 1.10
+PRECONDITION_RELEASE_POWER_TOL_MULT_T4: float = 1.40
+PRECONDITION_RELEASE_HEADROOM_RATIO_MULT_T2: float = 0.75
+PRECONDITION_RELEASE_HEADROOM_RATIO_MULT_T3: float = 1.00
+PRECONDITION_RELEASE_HEADROOM_RATIO_MULT_T4: float = 0.50
+PRECONDITION_RELEASE_HEADROOM_ABS_MULT_T2: float = 0.80
+PRECONDITION_RELEASE_HEADROOM_ABS_MULT_T3: float = 1.00
+PRECONDITION_RELEASE_HEADROOM_ABS_MULT_T4: float = 0.60
+PRECONDITION_RELEASE_MIN_DWELL_S_T2: float = 0.0
+PRECONDITION_RELEASE_MIN_DWELL_S_T3: float = 1.0
+PRECONDITION_RELEASE_MIN_DWELL_S_T4: float = 0.0
+PRECONDITION_RELEASE_VOLTAGE_GUARD_T2_V: float = 45.0
+PRECONDITION_RELEASE_VOLTAGE_GUARD_T3_V: float = 45.2
+PRECONDITION_RELEASE_VOLTAGE_GUARD_T4_V: float = 44.7
+PRECONDITION_BATTERY_BUFFER_MARGIN: float = 1.0
 WIND_TRIGGER_RATIO: float = 1.10
 WIND_TRIGGER_DELTA_COST_RATIO: float = WIND_TRIGGER_RATIO - 1.0
 EMS_MESSAGE_LOOKAHEAD_FACTOR: float = 1.0
@@ -64,23 +96,31 @@ T4_FC_STRESS_TRIGGER: float = 20.0
 T4_HEALTH_WEIGHT_TRIGGER: float = 1.02
 T4_HEAVY_WEIGHT_DELTA: float = 0.30
 SOH_DEGRADATION_PER_FC_STRESS: float = 2.0e-4
+T4_REPLAN_COOLDOWN_S: float = 10.0
 T2_COST_DELTA_RATIO_THRESHOLD: float = 0.19
 T2_COST_DELTA_ABS_THRESHOLD: float = 0.085
 T2_MIN_AFFECTED_EDGES: int = 4000
-T2_LOCAL_REFRESH_RADIUS_M: float = 96.0
-T2_LOCAL_MAX_WAYPOINTS: int = 4
+T2_LOCAL_REFRESH_RADIUS_M: float = 72.0
+T2_LOCAL_MAX_WAYPOINTS: int = 3
 T4_COST_DELTA_RATIO_THRESHOLD: float = 0.01
 T4_COST_DELTA_ABS_THRESHOLD: float = 0.02
+T4_STRESS_REPLAN_COST_DELTA_RATIO_THRESHOLD: float = 5.0e-4
+T4_STRESS_REPLAN_COST_DELTA_ABS_THRESHOLD: float = 0.05
+T4_FRONT_CORRIDOR_WAYPOINTS: int = 2
+T4_COMPETITIVE_FRONT_NODES: int = 6
+T4_HIGH_PSI_TOPK: int = 128
+T4_MIN_SWITCH_GAIN_RATIO: float = 0.01
+T4_MIN_SWITCH_GAIN_ABS: float = 0.5
 
-# Simulation parameters
+# 仿真参数
 CRUISE_SPEED: float = 15.0
 GRID_H_RES: float = 25.0
 GRID_V_RES: float = 50.0
 DEM_RES: float = 12.5
 ALPHA: float = 1.0
 BETA: float = 0.8
+BETA_H2_EFF: float = 800.0
 GAMMA: float = 0.6
-H2_COST_SCALE: float = 1000.0
 DEGRAD_CLIMB_RATE_REF_MPS: float = 3.0
 DEGRAD_HIGH_POWER_RATIO: float = 0.85
 DEGRAD_WIND_EXCESS_REF_MPS: float = 6.0
@@ -90,8 +130,9 @@ DEGRAD_WIND_WEIGHT: float = 0.20
 WIND_CD_BODY: float = 0.35
 WIND_A_BODY: float = 0.12
 WIND_HEADWIND_FRAC: float = 0.6
-W1: float = 0.6
-W2: float = 0.4
+W1: float = 0.35
+W2: float = 0.30
+W3: float = 0.20
 RHO_SEA_LEVEL: float = 1.225
 SIM_DT: float = 1.0
 SMOOTHING_FACTOR: float = 0.3
@@ -106,39 +147,42 @@ WIND_NORMAL: float = 3.0
 WIND_SHEAR: float = 14.0
 N_EVENTS: int = 3
 EVENT_INTERVALS: list[float] = [15.0, 10.0, 8.0]
+CONSTRAINT_EDGE_SAMPLE_COUNT: int = 5
+
+# 约束层输入，默认留空以兼容当前数据
+STATIC_OBSTACLES: tuple[dict[str, Any], ...] = ()
+AIRSPACE_CONSTRAINTS: tuple[dict[str, Any], ...] = ()
+DYNAMIC_OBSTACLE_EVENTS: tuple[dict[str, Any], ...] = ()
 
 SWEEP_PRESETS: dict[str, dict[str, float]] = {
-    "conservative": {
-        "FC_TARGET_DEMAND_MARGIN": 0.88,
-        "FC_TARGET_POWER_CAP_RATIO": 0.85,
-        "PASSIVE_BATTERY_OVERSUPPLY_RATIO": 1.02,
-        "FC_STRESS_POWER_STEP_REF_W": 100.0,
-        "FC_STRESS_RAMP_REF_W_PER_S": 70.0,
-        "WIND_TRIGGER_RATIO": 1.02,
+    "current": {},
+    "release_micro_a": {
+        "PRECONDITION_RELEASE_POWER_TOL_MULT_T2": 1.30,
+        "PRECONDITION_RELEASE_POWER_TOL_MULT_T3": 1.15,
+        "PRECONDITION_RELEASE_HEADROOM_RATIO_MULT_T2": 0.70,
+        "PRECONDITION_RELEASE_HEADROOM_ABS_MULT_T2": 0.75,
+        "PRECONDITION_TREND_RELEASE_EPS_W_PER_S": 6.0,
+        "PRECONDITION_BATTERY_BUFFER_MARGIN": 0.8,
     },
-    "current": {
-        "FC_RAMP_LIMIT": 135.0,
-        "FC_TARGET_DEMAND_MARGIN": 0.93,
-        "FC_TARGET_POWER_CAP_RATIO": 0.90,
-        "FC_PREVIEW_GAIN": 0.07,
-        "FC_TARGET_DEADBAND_W": 240.0,
-        "PASSIVE_BATTERY_OVERSUPPLY_RATIO": 1.05,
-        "FC_STRESS_POWER_STEP_REF_W": 120.0,
-        "FC_STRESS_RAMP_REF_W_PER_S": 80.0,
-        "WIND_TRIGGER_RATIO": 1.10,
+    "release_micro_b": {
+        "PRECONDITION_RELEASE_POWER_TOL_MULT_T2": 1.35,
+        "PRECONDITION_RELEASE_POWER_TOL_MULT_T3": 1.20,
+        "PRECONDITION_RELEASE_HEADROOM_RATIO_MULT_T2": 0.65,
+        "PRECONDITION_RELEASE_HEADROOM_ABS_MULT_T2": 0.70,
+        "PRECONDITION_TREND_RELEASE_EPS_W_PER_S": 8.0,
+        "PRECONDITION_BATTERY_BUFFER_MARGIN": 0.6,
     },
-    "aggressive": {
-        "FC_TARGET_DEMAND_MARGIN": 0.97,
-        "FC_TARGET_POWER_CAP_RATIO": 0.96,
-        "PASSIVE_BATTERY_OVERSUPPLY_RATIO": 1.10,
-        "FC_STRESS_POWER_STEP_REF_W": 140.0,
-        "FC_STRESS_RAMP_REF_W_PER_S": 95.0,
-        "WIND_TRIGGER_RATIO": 1.10,
+    "release_relaxed_b": {
+        "PRECONDITION_POWER_TOLERANCE_W": 200.0,
+        "PRECONDITION_BATTERY_HEADROOM_RATIO": 0.01,
+        "PRECONDITION_BATTERY_HEADROOM_A": 0.15,
+        "PRECONDITION_EVENT_SCALE_T2": 0.45,
+        "PRECONDITION_EVENT_SCALE_T3": 0.85,
     },
 }
 PRIMARY_SWEEP_LABEL: str = "current"
 
-# Mission configuration
+# 任务配置
 START_LON: float = 110.0869
 START_LAT: float = 34.4950
 START_ALT: float = 500.0
@@ -155,8 +199,28 @@ PEAKS: dict[str, dict[str, float]] = {
 }
 
 
+def implementation_mode() -> str:
+    """返回当前实现模式。"""
+    return IMPLEMENTATION_MODE.strip().lower()
+
+
+def is_spec_mode() -> bool:
+    """是否使用说明书优先模式。"""
+    return implementation_mode() == "spec_first"
+
+
+def is_robust_mode() -> bool:
+    """是否使用鲁棒实验模式。"""
+    return implementation_mode() == "robust_experiment"
+
+
+def is_simulation_approx_mode() -> bool:
+    """是否使用近似仿真模式。"""
+    return implementation_mode() == "simulation_approx"
+
+
 def k_soh(soh: float) -> float:
-    """Return the adaptive SoH weight."""
+    """返回 SoH 自适应权重。"""
     if soh >= 0.9:
         return 1.0
     if soh >= 0.8:
@@ -167,7 +231,7 @@ def k_soh(soh: float) -> float:
 
 
 def health_reset_stage(soh: float) -> int:
-    """Return a coarse health stage for deciding whether a planner reset is necessary."""
+    """返回健康状态分段。"""
     weight = k_soh(soh)
     if weight < 1.25:
         return 0
@@ -176,14 +240,28 @@ def health_reset_stage(soh: float) -> int:
     return 2
 
 
+def fc_dp_step_limit(soh: float, fc_power_w: float = 0.0, v_bus_v: float = V_BUS) -> float:
+    """根据当前状态计算允许的最大功率跃迁。"""
+    del fc_power_w, v_bus_v
+    if not is_spec_mode():
+        return FC_DP_MAX_STEP
+
+    weight = max(1.0, k_soh(soh))
+    limit = FC_DP_MAX_STEP / weight
+    return max(FC_DP_MAX_STEP * FC_DP_MAX_STEP_MIN_RATIO, limit)
+
+
 def air_density(altitude_m: float) -> float:
-    """Standard-atmosphere density approximation."""
+    """标准大气密度近似。"""
     return RHO_SEA_LEVEL * (1.0 - 2.2558e-5 * altitude_m) ** 4.2559
 
 
 def snapshot() -> dict[str, Any]:
-    """Return the runtime configuration snapshot for exported results."""
+    """返回运行时配置快照。"""
     return {
+        "implementation": {
+            "mode": IMPLEMENTATION_MODE,
+        },
         "platform": {
             "mass_kg": MASS,
             "rotor_radius_m": ROTOR_RADIUS,
@@ -193,12 +271,18 @@ def snapshot() -> dict[str, Any]:
             "bat_capacity_ah": BAT_CAPACITY_AH,
             "bat_voltage_v": BAT_VOLTAGE,
             "v_bus_v": V_BUS,
+            "battery_current_limit_init_a": BATTERY_CURRENT_LIMIT_INIT_A,
+            "descent_power_factor": DESCENT_POWER_FACTOR,
         },
         "control": {
             "fc_tau_s": FC_TAU,
             "control_message_delay_s": CONTROL_MESSAGE_DELAY_S,
+            "control_dt_s": CONTROL_DT,
+            "trigger_min_interval_s": TRIGGER_MIN_INTERVAL_S,
+            "event_merge_window_s": EVENT_MERGE_WINDOW_S,
             "fc_dp_dt_max_wps": FC_DP_DT_MAX,
             "fc_dp_max_step_w": FC_DP_MAX_STEP,
+            "fc_dp_max_step_min_ratio": FC_DP_MAX_STEP_MIN_RATIO,
             "fc_ramp_limit_wps": FC_RAMP_LIMIT,
             "fc_target_demand_margin": FC_TARGET_DEMAND_MARGIN,
             "fc_target_power_cap_ratio": FC_TARGET_POWER_CAP_RATIO,
@@ -213,6 +297,29 @@ def snapshot() -> dict[str, Any]:
             "undersupply_droop_resistance_ohm": UNDERSUPPLY_DROOP_RESISTANCE,
             "fc_stress_power_step_ref_w": FC_STRESS_POWER_STEP_REF_W,
             "fc_stress_ramp_ref_wps": FC_STRESS_RAMP_REF_W_PER_S,
+            "precondition_power_tolerance_w": PRECONDITION_POWER_TOLERANCE_W,
+            "precondition_event_scale_t2": PRECONDITION_EVENT_SCALE_T2,
+            "precondition_event_scale_t3": PRECONDITION_EVENT_SCALE_T3,
+            "precondition_event_scale_t4": PRECONDITION_EVENT_SCALE_T4,
+            "precondition_battery_headroom_ratio": PRECONDITION_BATTERY_HEADROOM_RATIO,
+            "precondition_battery_headroom_a": PRECONDITION_BATTERY_HEADROOM_A,
+            "precondition_trend_release_eps_wps": PRECONDITION_TREND_RELEASE_EPS_W_PER_S,
+            "precondition_release_power_tol_mult_t2": PRECONDITION_RELEASE_POWER_TOL_MULT_T2,
+            "precondition_release_power_tol_mult_t3": PRECONDITION_RELEASE_POWER_TOL_MULT_T3,
+            "precondition_release_power_tol_mult_t4": PRECONDITION_RELEASE_POWER_TOL_MULT_T4,
+            "precondition_release_headroom_ratio_mult_t2": PRECONDITION_RELEASE_HEADROOM_RATIO_MULT_T2,
+            "precondition_release_headroom_ratio_mult_t3": PRECONDITION_RELEASE_HEADROOM_RATIO_MULT_T3,
+            "precondition_release_headroom_ratio_mult_t4": PRECONDITION_RELEASE_HEADROOM_RATIO_MULT_T4,
+            "precondition_release_headroom_abs_mult_t2": PRECONDITION_RELEASE_HEADROOM_ABS_MULT_T2,
+            "precondition_release_headroom_abs_mult_t3": PRECONDITION_RELEASE_HEADROOM_ABS_MULT_T3,
+            "precondition_release_headroom_abs_mult_t4": PRECONDITION_RELEASE_HEADROOM_ABS_MULT_T4,
+            "precondition_release_min_dwell_s_t2": PRECONDITION_RELEASE_MIN_DWELL_S_T2,
+            "precondition_release_min_dwell_s_t3": PRECONDITION_RELEASE_MIN_DWELL_S_T3,
+            "precondition_release_min_dwell_s_t4": PRECONDITION_RELEASE_MIN_DWELL_S_T4,
+            "precondition_release_voltage_guard_t2_v": PRECONDITION_RELEASE_VOLTAGE_GUARD_T2_V,
+            "precondition_release_voltage_guard_t3_v": PRECONDITION_RELEASE_VOLTAGE_GUARD_T3_V,
+            "precondition_release_voltage_guard_t4_v": PRECONDITION_RELEASE_VOLTAGE_GUARD_T4_V,
+            "precondition_battery_buffer_margin": PRECONDITION_BATTERY_BUFFER_MARGIN,
             "wind_trigger_ratio": WIND_TRIGGER_RATIO,
             "t3_lookahead_segments": T3_LOOKAHEAD_SEGMENTS,
             "t3_profile_lookahead_s": T3_PROFILE_LOOKAHEAD_S,
@@ -224,6 +331,7 @@ def snapshot() -> dict[str, Any]:
             "t4_health_weight_trigger": T4_HEALTH_WEIGHT_TRIGGER,
             "t4_heavy_weight_delta": T4_HEAVY_WEIGHT_DELTA,
             "soh_degradation_per_fc_stress": SOH_DEGRADATION_PER_FC_STRESS,
+            "t4_replan_cooldown_s": T4_REPLAN_COOLDOWN_S,
             "t2_cost_delta_ratio_threshold": T2_COST_DELTA_RATIO_THRESHOLD,
             "t2_cost_delta_abs_threshold": T2_COST_DELTA_ABS_THRESHOLD,
             "t2_min_affected_edges": T2_MIN_AFFECTED_EDGES,
@@ -231,6 +339,13 @@ def snapshot() -> dict[str, Any]:
             "t2_local_max_waypoints": T2_LOCAL_MAX_WAYPOINTS,
             "t4_cost_delta_ratio_threshold": T4_COST_DELTA_RATIO_THRESHOLD,
             "t4_cost_delta_abs_threshold": T4_COST_DELTA_ABS_THRESHOLD,
+            "t4_stress_replan_cost_delta_ratio_threshold": T4_STRESS_REPLAN_COST_DELTA_RATIO_THRESHOLD,
+            "t4_stress_replan_cost_delta_abs_threshold": T4_STRESS_REPLAN_COST_DELTA_ABS_THRESHOLD,
+            "t4_front_corridor_waypoints": T4_FRONT_CORRIDOR_WAYPOINTS,
+            "t4_competitive_front_nodes": T4_COMPETITIVE_FRONT_NODES,
+            "t4_high_psi_topk": T4_HIGH_PSI_TOPK,
+            "t4_min_switch_gain_ratio": T4_MIN_SWITCH_GAIN_RATIO,
+            "t4_min_switch_gain_abs": T4_MIN_SWITCH_GAIN_ABS,
         },
         "simulation": {
             "cruise_speed_mps": CRUISE_SPEED,
@@ -239,14 +354,17 @@ def snapshot() -> dict[str, Any]:
             "dem_res_m": DEM_RES,
             "alpha": ALPHA,
             "beta": BETA,
+            "beta_h2_eff": BETA_H2_EFF,
             "gamma": GAMMA,
-            "h2_cost_scale": H2_COST_SCALE,
             "degrad_climb_rate_ref_mps": DEGRAD_CLIMB_RATE_REF_MPS,
             "degrad_high_power_ratio": DEGRAD_HIGH_POWER_RATIO,
             "degrad_wind_excess_ref_mps": DEGRAD_WIND_EXCESS_REF_MPS,
             "degrad_climb_weight": DEGRAD_CLIMB_WEIGHT,
             "degrad_high_power_weight": DEGRAD_HIGH_POWER_WEIGHT,
             "degrad_wind_weight": DEGRAD_WIND_WEIGHT,
+            "w1": W1,
+            "w2": W2,
+            "w3": W3,
             "sim_dt_s": SIM_DT,
             "smoothing_factor": SMOOTHING_FACTOR,
             "initial_corridor_radius_m": INITIAL_CORRIDOR_RADIUS_M,
@@ -261,6 +379,10 @@ def snapshot() -> dict[str, Any]:
             "wind_shear_mps": WIND_SHEAR,
             "n_events": N_EVENTS,
             "event_intervals_s": list(EVENT_INTERVALS),
+            "constraint_edge_sample_count": CONSTRAINT_EDGE_SAMPLE_COUNT,
+            "static_obstacles": list(STATIC_OBSTACLES),
+            "airspace_constraints": list(AIRSPACE_CONSTRAINTS),
+            "dynamic_obstacle_events": list(DYNAMIC_OBSTACLE_EVENTS),
             "sweep_presets": SWEEP_PRESETS,
             "primary_sweep_label": PRIMARY_SWEEP_LABEL,
         },
@@ -269,4 +391,3 @@ def snapshot() -> dict[str, Any]:
             "goal": {"lon": GOAL_LON, "lat": GOAL_LAT, "alt": GOAL_ALT},
         },
     }
-

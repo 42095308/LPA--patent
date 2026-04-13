@@ -9,6 +9,7 @@ from scipy.interpolate import splrep, splev
 
 import config
 from energy_map import EnergyMap, _hover_power
+from state_models import StructuredMessage
 
 
 def extract_geometry(energy_map: EnergyMap, path: List[int]) -> List[Dict[str, float]]:
@@ -139,28 +140,29 @@ def extract_feature_vector(
 
 def build_structured_message(
     timestamp: float,
-    replanning_id: int,
     feature_vec: Dict[str, float],
     time_arr: np.ndarray,
     power_arr: np.ndarray,
     t_window: float,
+    meta: Dict[str, object] | None = None,
 ) -> Dict[str, object]:
-    """Build the structured feedforward message for the EMS."""
-    return {
-        "timestamp": float(timestamp),
-        "replanning_id": int(replanning_id),
-        "feature_vector": {
+    """构建结构化前馈消息。"""
+    message = StructuredMessage(
+        timestamp=float(timestamp),
+        feature_vector={
             "P_peak": float(feature_vec["P_peak"]),
             "T_ramp": float(feature_vec["T_ramp"]),
             "avg_climb_rate": float(feature_vec["avg_climb_rate"]),
             "E_hydrogen": float(feature_vec["E_hydrogen"]),
         },
-        "P_predict": {
+        P_predict={
             "time_s": [float(t) for t in time_arr.tolist()],
             "power_w": [float(p) for p in power_arr.tolist()],
         },
-        "T_window": float(t_window),
-    }
+        T_window=float(t_window),
+        meta=dict(meta or {}),
+    )
+    return message.to_dict()
 
 
 def classify_flight_phases(energy_map: EnergyMap, path: List[int]) -> List[Dict[str, float]]:
